@@ -375,7 +375,7 @@ if sidebar_option == "主控台 / 檢索系統":
         # 第一排：新增服務處與同工姓名
         row1_col1, row1_col2 = st.columns(2)
         with row1_col1:
-            office_list = ["彰化分事務所", "和美兒童館", "員林服務處", "田中服務處", "鹿港服務處", "二林服務處"]
+            office_list = ["彰化分事務所", "和美兒童館", "員林服務處", "田中服務處", "彰化服務處", "二林服務處","中心行政組"]
             selected_office = st.selectbox("🏢 篩選服務處", options=office_list)
         with row1_col2:
             staff_name = st.text_input("👤 同工姓名", placeholder="請輸入填表/檢索同工姓名")
