@@ -116,10 +116,9 @@ st.markdown('<div class="sub-header">自動整合 Google News 即時新聞，並
 # 警示橫幅
 st.markdown("""
 <div class="warning-bar">
-    <p class="warning-text">※此系統為個人自主開發，請勿用做非法行為！😈
-    <p class="warning-text">※檢索資料庫為「彰化家扶」常見出報媒體，資料庫將不定期更新。👀
+    <p class="warning-text">※此系統為個人自主開發，請勿用做非法行為😈
+    <p class="warning-text">※檢索資料庫為「彰化家扶」常見出報媒體，資料庫將不定期更新👀
 </div>
-""", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # 3. 側邊欄下拉式選單與模組控制
@@ -168,9 +167,10 @@ if sidebar_option == "系統簡介":
 elif sidebar_option == "系統須知":
     st.subheader("📌 系統須知與使用規範")
     st.warning("""
-    1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索與學術研究使用，嚴禁用於商業爬蟲、攻擊或任何非法用途。
-    2. ** API 額度限制**：請勿短時間內頻繁發送大規模檢索請求，以免觸發 API 限流或配額耗盡。
+    1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索與學術研究使用，嚴禁用於商業爬蟲、網路攻擊或任何非法用途。
+    2. **API額度限制**：請勿短時間內頻繁發送大規模檢索請求，以免觸發 API 限流或配額耗盡。
     3. **資料準確性**：AI 自動解析結果僅供參考，匯出報表後建議人工進行二次核對。
+    4. **中心PDF檔留存**：報表生成後，請將每一篇報導儲存成PDF檔，放置於中心查報資料夾。
     """)
 
 # --- 模組 C：系統管理員 (後台驗證) ---
@@ -448,4 +448,3 @@ if sidebar_option == "主控台 / 檢索系統":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
-
