@@ -53,18 +53,18 @@ if db_unlocked:
         st.sidebar.error("密碼錯誤")
 
 # ---------------------------------------------------------------------------
-# 3. 核心搜尋與 AI 年份精準過濾邏輯 (Google News RSS 串流)
+# 3. 核心搜尋與 AI 分批解析 (含 429 防爆與自動重試機制)
 # ---------------------------------------------------------------------------
 def run_news_pipeline(org, keyword, year, db_df, GEMINI_API_KEY):
     db_context = ""
     if db_df is not None:
         db_context = db_df.to_string(index=False)[:1000]
 
-    # 1. 組合搜尋關鍵字並進行 URL 編碼
+    # A. 組合搜尋關鍵字並進行 URL 編碼
     search_query = f"{org} {keyword}"
     encoded_query = urllib.parse.quote(search_query)
     
-    # 2. 存取 Google News 台灣區中文 RSS 串流 (免費、免金鑰、不限制 IP)
+    # B. 存取 Google News 台灣區中文 RSS 串流 (免費、免金鑰、不限制 IP)
     rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
     
     raw_results = []
@@ -97,10 +97,12 @@ def run_news_pipeline(org, keyword, year, db_df, GEMINI_API_KEY):
     if not raw_results:
         return []
 
-    # 3. AI 分批解析 (交由 Gemini 讀取發布時間與內容，精準篩選年份與清整標題)
+    # C. AI 分批解析 (加入 429 防爆與自動重試機制)
     results = []
     client = genai.Client(api_key=GEMINI_API_KEY)
-    batch_size = 25
+    
+    # 放大批次數量 (例如一次處理 50 筆)，減少呼叫 API 次數
+    batch_size = 50
     batches = [raw_results[i:i + batch_size] for i in range(0, len(raw_results), batch_size)]
     
     progress_bar = st.progress(0, text=f"🤖 Gemini 正在精準篩選 {year} 年份報導並整理結構...")
@@ -133,19 +135,29 @@ def run_news_pipeline(org, keyword, year, db_df, GEMINI_API_KEY):
             ]
         }}
         """
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            res_data = json.loads(response.text)
-            results.extend(res_data.get("articles", []))
-        except Exception as e:
-            st.warning(f"第 {idx} 批次 AI 解析稍有延遲：{e}")
+        
+        # 進行最多 3 次重試，應對 429 API Rate Limit 限制
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                res_data = json.loads(response.text)
+                results.extend(res_data.get("articles", []))
+                break  # 成功就跳出重試迴圈
+            except Exception as e:
+                if "429" in str(e) and attempt < max_retries - 1:
+                    st.toast(f"⏳ 觸發 API 頻率限制，等待 15 秒後重試第 {idx} 批次...", icon="⏳")
+                    time.sleep(15)  # 等待 15 秒讓 Quota 冷卻
+                else:
+                    st.warning(f"第 {idx} 批次 AI 解析失敗：{e}")
+                    break
             
         progress_bar.progress(idx / len(batches))
-        time.sleep(1.0)
+        time.sleep(4.0)  # 每批次間隔加大至 4 秒，防止瞬間請求過高
         
     progress_bar.empty()
     return results
