@@ -116,11 +116,10 @@ st.markdown('<div class="sub-header">自動整合 Google News 即時新聞，並
 # 警示橫幅
 st.markdown("""
 <div class="warning-bar">
-    <p class="warning-text">※此系統為個人自主開發，請勿用做非法行為😈
-    <p class="warning-text">※檢索資料庫為「彰化家扶」常見出報媒體，資料庫將不定期更新👀
-    <p class="warning-text">※此系統供同工免費使用，惟開發者仍保有此系統所有權🔧
-
-</div> 
+    <p class="warning-text">※此系統為個人自主開發，請勿用做非法行為😈</p>
+    <p class="warning-text">※檢索資料庫為「彰化家扶」常見出報媒體，資料庫將不定期更新👀</p>
+    <p class="warning-text">※此系統供同工免費使用，惟開發者仍保有此系統所有權🔧</p>
+</div>
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
@@ -148,6 +147,7 @@ if os.path.exists(db_file_path):
     try:
         db_df = pd.read_csv(db_file_path, encoding='utf-8').dropna(how='all')
         st.sidebar.success("✅ database.csv 已連線")
+        st.sidebar.caption(f"已載入 {len(db_df)} 筆媒體資料庫對照檔")
     except Exception as e:
         st.sidebar.error(f"❌ 讀取 database.csv 失敗: {e}")
 
@@ -162,9 +162,9 @@ if sidebar_option == "系統簡介":
     **彰化家扶中心輿情自動檢索與報表生成系統** 旨在幫助同工快速彙整網路媒體報導。
     
     * **即時檢索**：自動抓取 Google News 最新相關新聞。
-    * **AI 結構化整理**：運用 Gemini AI 自動識別新聞標題、發布年份、記者姓名並進行資料淨化。
-    * **一鍵報表**：自動產出包含超連結的標準化 Excel 檔案，提升行政與輿情整理效率。
-    * **模組化減速**：批次發送檢索請求，避免觸發 Google 反爬蟲機制 (Anti-Scraping)。
+    * **AI 結構化整理**：運用 Gemini AI 自動識別新聞標題、發布年份、記者姓名、對照媒體分類（三大報/非三大報等）並進行資料淨化。
+    * **一鍵報表**：自動產出包含超連結與媒體分類的標準化 Excel 檔案，提升行政與輿情整理效率。
+    * **模組化減速**：批次發送檢索請求，避免觸發 Google反爬蟲機制 (Anti-Scraping)。
     """)
 
 # --- 模組 B：系統須知 ---
@@ -254,7 +254,8 @@ def run_news_pipeline(office, staff_name, org, keyword, year, db_df, GEMINI_API_
 
     db_context = ""
     if db_df is not None and not db_df.empty:
-        clean_db = db_df.head(10).to_dict(orient="records")
+        # 將整份 database.csv 的對照資料轉為 JSON 供 AI 參考
+        clean_db = db_df.to_dict(orient="records")
         db_context = json.dumps(clean_db, ensure_ascii=False)
 
     search_query = f"{org} {keyword}"
@@ -300,25 +301,32 @@ def run_news_pipeline(office, staff_name, org, keyword, year, db_df, GEMINI_API_
     # 建立飛機進度條動態佔位容器
     progress_placeholder = st.empty()
     progress_placeholder.markdown(
-        render_airplane_progress(0, f"🤖 Gemini 正在精準篩選 {year} 年份報導並整理結構..."), 
+        render_airplane_progress(0, f"🤖 Gemini 正在精準篩選 {year} 年份報導並對照媒體分類..."), 
         unsafe_allow_html=True
     )
     
     for idx, batch in enumerate(batches, start=1):
         prompt = f"""
-        數據庫參考：{db_context}
-        原始新聞：{json.dumps(batch, ensure_ascii=False)}
+        媒體數據庫對照清單 (包含媒體名稱與媒體類型，如「三大報全國性」、「非三大報全國性」)：
+        {db_context}
 
-        請篩選出符合條件的新聞：
-        1. 標題或內容包含「{org}」與「{keyword}」。
+        原始新聞資料：
+        {json.dumps(batch, ensure_ascii=False)}
+
+        請執行以下分析與篩選任務：
+        1. 篩選標題或內容包含「{org}」與「{keyword}」的新聞。
         2. 發布年份必須為『{year}』年。
-        3. 清除標題中的媒體名稱後綴。
+        3. 清除標題中的媒體名稱後綴（例如「 - 自由時報」）。
+        4. 比對媒體數據庫對照清單：
+           - 依據原始新聞的媒體名稱，匹配數據庫中的「媒體類型」（例如：「三大報全國性」、「非三大報全國性」）。
+           - 若數據庫中找不到對應的媒體名稱，請預設填寫「網路媒體」。
 
-        輸出 JSON：
+        請嚴格回傳 JSON 格式：
         {{
             "articles": [
                 {{
                     "media_name": "媒體名稱",
+                    "media_type": "媒體類型 (如: 三大報全國性 / 非三大報全國性 / 網路媒體)",
                     "title": "純標題",
                     "reporter": "記者姓名 (若無填 '編輯部')",
                     "url": "新聞連結"
@@ -362,7 +370,7 @@ def run_news_pipeline(office, staff_name, org, keyword, year, db_df, GEMINI_API_
     return results
 
 # ---------------------------------------------------------------------------
-# 6. 主控台介面 (包含新增選取方塊)
+# 6. 主控台介面 (包含選取服務處與輸入條件)
 # ---------------------------------------------------------------------------
 if sidebar_option == "主控台 / 檢索系統":
     if not api_key:
@@ -373,10 +381,10 @@ if sidebar_option == "主控台 / 檢索系統":
         st.markdown('<div class="search-card">', unsafe_allow_html=True)
         st.subheader("🔍 設定檢索條件")
         
-        # 第一排：新增服務處與同工姓名
+        # 第一排：服務處與同工姓名
         row1_col1, row1_col2 = st.columns(2)
         with row1_col1:
-            office_list = ["彰化分事務所", "和美兒童館", "員林服務處", "田中服務處", "彰化服務處", "二林服務處","中心行政組"]
+            office_list = ["彰化分事務所", "和美兒童館", "員林服務處", "田中服務處", "彰化服務處", "二林服務處", "中心行政組"]
             selected_office = st.selectbox("🏢 篩選服務處", options=office_list)
         with row1_col2:
             staff_name = st.text_input("👤 同工姓名", placeholder="請輸入填表/檢索同工姓名")
@@ -416,8 +424,9 @@ if sidebar_option == "主控台 / 檢索系統":
                 df_display["服務處"] = selected_office
                 df_display["檢索同工"] = staff_name
                 
-                df_export = df_display[["服務處", "檢索同工", "media_name", "title", "reporter", "url"]].copy()
-                df_export.columns = ["服務處", "檢索同工", "媒體名稱", "新聞標題", "記者", "新聞連結"]
+                # 調整輸出欄位順序（加入媒體類型欄位）
+                df_export = df_display[["服務處", "檢索同工", "media_name", "media_type", "title", "reporter", "url"]].copy()
+                df_export.columns = ["服務處", "檢索同工", "媒體名稱", "媒體類型", "新聞標題", "記者", "新聞連結"]
                 
                 st.dataframe(
                     df_export,
@@ -428,23 +437,26 @@ if sidebar_option == "主控台 / 檢索系統":
                     hide_index=True
                 )
                 
-                # 產出 Excel
+                # 產出 Excel 檔案
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     df_export.to_excel(writer, index=False, sheet_name='輿情報導')
                     
                     worksheet = writer.sheets['輿情報導']
+                    # 新聞連結位在第 G 欄（第 7 欄），專門設定點擊超連結
                     for row_idx, url in enumerate(df_export['新聞連結'], start=2):
-                        cell = worksheet.cell(row=row_idx, column=6)
+                        cell = worksheet.cell(row=row_idx, column=7)
                         cell.hyperlink = url
                         cell.style = "Hyperlink"
                     
-                    worksheet.column_dimensions['A'].width = 18
-                    worksheet.column_dimensions['B'].width = 12
-                    worksheet.column_dimensions['C'].width = 18
-                    worksheet.column_dimensions['D'].width = 45
-                    worksheet.column_dimensions['E'].width = 12
-                    worksheet.column_dimensions['F'].width = 35
+                    # 調整 Excel 各欄位寬度
+                    worksheet.column_dimensions['A'].width = 18  # 服務處
+                    worksheet.column_dimensions['B'].width = 12  # 檢索同工
+                    worksheet.column_dimensions['C'].width = 18  # 媒體名稱
+                    worksheet.column_dimensions['D'].width = 18  # 媒體類型 (三大報/非三大報等)
+                    worksheet.column_dimensions['E'].width = 45  # 新聞標題
+                    worksheet.column_dimensions['F'].width = 12  # 記者
+                    worksheet.column_dimensions['G'].width = 35  # 新聞連結
 
                 st.markdown("---")
                 st.download_button(
@@ -454,5 +466,3 @@ if sidebar_option == "主控台 / 檢索系統":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
- 
-
