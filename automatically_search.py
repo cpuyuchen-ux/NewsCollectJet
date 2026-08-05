@@ -11,22 +11,99 @@ from google import genai
 from google.genai import types
 
 # ---------------------------------------------------------------------------
-# 1. 頁面配置與標題
+# 1. 頁面配置與自訂 CSS 樣式 (UI 美化核心)
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="彰化中心輿情自動檢索系統", page_icon="📰", layout="wide")
+st.set_page_config(
+    page_title="彰化家扶輿情自動檢索與報表生成系統", 
+    page_icon="📰", 
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.title("📰 彰化中心輿情自動檢索與報表生成系統")
-st.caption("自動經由 Google News RSS 抓取新聞，並運用 Gemini AI 精準篩選年份與格式化")
+# 注入自訂 CSS 來打造現代化介面
+st.markdown("""
+<style>
+    /* 全局字體與背景優化 */
+    .main {
+        background-color: #f8f9fa;
+    }
+    
+    /* 主標題樣式 */
+    .main-header {
+        font-size: 2.2rem;
+        font-weight: 700;
+        background: linear-gradient(120deg, #1E3A8A, #3B82F6);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 0.2rem;
+    }
+    
+    .sub-header {
+        color: #6B7280;
+        font-size: 1.0rem;
+        margin-bottom: 1.5rem;
+    }
+
+    /* 搜尋區塊卡片化 */
+    .search-card {
+        background-color: #ffffff;
+        padding: 1.5rem;
+        border-radius: 12px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+        border: 1px solid #E5E7EB;
+        margin-bottom: 1.5rem;
+    }
+    
+    /* 側邊欄優化 */
+    [data-testid="stSidebar"] {
+        background-color: #f1f5f9;
+        border-right: 1px solid #E2E8F0;
+    }
+    
+    /* 狀態卡片微調 */
+    .status-badge {
+        display: inline-block;
+        padding: 0.25rem 0.75rem;
+        border-radius: 9999px;
+        font-size: 0.875rem;
+        font-weight: 600;
+    }
+    
+    /* 按鈕美化加強 */
+    div.stButton > button:first-child {
+        background: linear-gradient(90deg, #2563EB, #1D4ED8);
+        color: white;
+        border: none;
+        padding: 0.6rem 1.2rem;
+        font-weight: 600;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(37, 99, 235, 0.2);
+        transition: all 0.3s ease;
+    }
+    
+    div.stButton > button:first-child:hover {
+        background: linear-gradient(90deg, #1D4ED8, #1E40AF);
+        box-shadow: 0 4px 8px rgba(37, 99, 235, 0.3);
+        transform: translateY(-1px);
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# 2. 金鑰與自動載入內部數據庫 (方案 A)
+# 2. 標題區塊
 # ---------------------------------------------------------------------------
-st.sidebar.header("⚙️ 系統設定")
+st.markdown('<div class="main-header">📰 彰化家扶中心輿情自動檢索與報表生成系統</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">自動整合 Google News 即時新聞，並透過 Gemini AI 自動進行年份對齊與格式化</div>', unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# 3. 側邊欄設定與 Database 狀態檢查
+# ---------------------------------------------------------------------------
+st.sidebar.header("⚙️ 系統核心設定")
 
 # 讀取 API Key (優先讀取 Secrets)
 api_key = st.secrets.get("GEMINI_API_KEY", "")
 if not api_key:
-    api_key = st.sidebar.text_input("輸入 Gemini API Key:", type="password")
+    api_key = st.sidebar.text_input("🔑 輸入 Gemini API Key:", type="password", help="請輸入您的 Gemini API Key 以啟用 AI 解析功能")
 
 if not api_key:
     st.warning("⚠️ 請先在 Streamlit Secrets 設定 `GEMINI_API_KEY` 或於左側欄位輸入 API Key 以開始使用。")
@@ -41,20 +118,23 @@ db_df = None
 
 if os.path.exists(db_file_path):
     try:
-        db_df = pd.read_csv(db_file_path)
-        st.sidebar.success(f"✅ 已載入內部數據庫\n(共 {len(db_df)} 筆參考資料)")
+        db_df = pd.read_csv(db_file_path, encoding='utf-8').dropna(how='all')
+        st.sidebar.success("✅ Database.csv 已連線")
+        st.sidebar.metric(label="數據庫媒體筆數", value=f"{len(db_df)} 筆")
     except Exception as e:
         st.sidebar.error(f"❌ 讀取 Database.csv 失敗: {e}")
 else:
-    st.sidebar.info("ℹ️ 未檢測到 Database.csv (系統將以一般模式搜尋)")
+    st.sidebar.info("ℹ️ 未檢測到 Database.csv\n(系統將以一般模式搜尋)")
 
 # ---------------------------------------------------------------------------
-# 3. 核心搜尋與 AI 分批解析 (強化版重試機制)
+# 4. 核心搜尋與 AI 分批解析 (帶有防錯與 Token 瘦身機制)
 # ---------------------------------------------------------------------------
 def run_news_pipeline(org, keyword, year, db_df, GEMINI_API_KEY):
+    # 乾淨地將 CSV 轉為簡短 JSON，大幅省 Token
     db_context = ""
-    if db_df is not None:
-        db_context = db_df.to_string(index=False)[:500]
+    if db_df is not None and not db_df.empty:
+        clean_db = db_df.head(10).to_dict(orient="records")
+        db_context = json.dumps(clean_db, ensure_ascii=False)
 
     # A. 組合搜尋關鍵字並進行 URL 編碼
     search_query = f"{org} {keyword}"
@@ -64,7 +144,7 @@ def run_news_pipeline(org, keyword, year, db_df, GEMINI_API_KEY):
     rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
     
     raw_results = []
-    with st.spinner(f"正在經由 Google News 檢索『{search_query}』新聞報導..."):
+    with st.spinner(f"📡 正在經由 Google News 檢索『{search_query}』新聞報導..."):
         try:
             req = urllib.request.Request(
                 rss_url, 
@@ -87,13 +167,13 @@ def run_news_pipeline(org, keyword, year, db_df, GEMINI_API_KEY):
                     "media_name": source
                 })
         except Exception as e:
-            st.error(f"Google News 檢索異常：{e}")
+            st.error(f"❌ Google News 檢索異常：{e}")
             return []
 
     if not raw_results:
         return []
 
-    # C. AI 分批解析 (每批 10 筆，降低 Token 消耗)
+    # C. AI 分批解析 (每批 10 筆)
     results = []
     client = genai.Client(api_key=GEMINI_API_KEY)
     
@@ -125,7 +205,7 @@ def run_news_pipeline(org, keyword, year, db_df, GEMINI_API_KEY):
         }}
         """
         
-        # 強制重試機制 (最多重試 3 次，間隔 60 秒)
+        # 強制重試機制
         max_retries = 3
         success = False
         
@@ -154,26 +234,37 @@ def run_news_pipeline(org, keyword, year, db_df, GEMINI_API_KEY):
     return results
 
 # ---------------------------------------------------------------------------
-# 4. 主要 UI 操作介面
+# 5. 主要 UI 操作介面 (卡片化容器)
 # ---------------------------------------------------------------------------
-col1, col2, col3 = st.columns(3)
-with col1:
-    target_org = st.text_input("機構/品牌名稱", value="麗寶樂園")
-with col2:
-    search_keyword = st.text_input("搜尋關鍵字", value="斷軌")
-with col3:
-    target_year = st.text_input("指定目標年份 (YYYY)", value="2026")
+with st.container():
+    st.markdown('<div class="search-card">', unsafe_allow_html=True)
+    st.subheader("🔍 設定檢索條件")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        target_org = st.text_input("🏢 機構 / 品牌名稱", value="彰化家扶", placeholder="例：彰化家扶")
+    with col2:
+        search_keyword = st.text_input("🔑 搜尋關鍵字", value="課輔班", placeholder="例：課輔班、相見歡")
+    with col3:
+        target_year = st.text_input("📅 目標年份 (YYYY)", value="2026", placeholder="例：2026")
 
-if st.button("🚀 開始自動化檢索", type="primary", use_container_width=True):
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# 搜尋執行按鈕
+if st.button("🚀 開始自動化檢索與 AI 解析", type="primary", use_container_width=True):
     if not target_org or not search_keyword or not target_year:
-        st.error("請完整填寫搜尋條件！")
+        st.error("⚠️ 請完整填寫所有搜尋條件！")
     else:
         results = run_news_pipeline(target_org, search_keyword, target_year, db_df, api_key)
         
         if not results:
-            st.warning(f"未找到符合條件的 {target_year} 年新聞報導 (或因免費 API 額度限制未能順利解析)。")
+            st.warning(f"🔍 未找到符合條件的 {target_year} 年新聞報導 (或因免費 API 額度限制未能順利解析)。")
         else:
+            st.balloons() # 搜尋成功的小慶祝動畫
             st.success(f"🎉 成功找到 {len(results)} 筆符合條件的 {target_year} 年新聞報導！")
+            
+            # 結果展示區塊
+            st.subheader("📋 輿情數據預覽")
             
             df_display = pd.DataFrame(results)
             df_export = df_display[["media_name", "title", "reporter", "url"]].copy()
@@ -188,6 +279,7 @@ if st.button("🚀 開始自動化檢索", type="primary", use_container_width=T
                 hide_index=True
             )
             
+            # 產出 Excel 檔案
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_export.to_excel(writer, index=False, sheet_name='輿情報導')
@@ -203,8 +295,9 @@ if st.button("🚀 開始自動化檢索", type="primary", use_container_width=T
                 worksheet.column_dimensions['C'].width = 15
                 worksheet.column_dimensions['D'].width = 40
 
+            st.markdown("---")
             st.download_button(
-                label="📥 下載 Excel 輿情報表",
+                label="📥 下載 Excel 格式輿情報表",
                 data=output.getvalue(),
                 file_name=f"{target_org}_{search_keyword}_{target_year}_輿情報表.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
