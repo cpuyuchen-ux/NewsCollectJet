@@ -140,14 +140,22 @@ if not api_key:
 
 st.sidebar.markdown("---")
 
-# 檢查 database 狀態
+# 檢查 database 狀態並建立對照字典 (本地對照字典，大幅節省 Token)
 db_file_path = "database.csv"
 db_df = None
+media_type_map = {}
+
 if os.path.exists(db_file_path):
     try:
         db_df = pd.read_csv(db_file_path, encoding='utf-8').dropna(how='all')
         st.sidebar.success("✅ database.csv 已連線")
         st.sidebar.caption(f"已載入 {len(db_df)} 筆媒體資料庫對照檔")
+        
+        # 假設 A 欄為媒體名稱，B 欄為媒體類型
+        if len(db_df.columns) >= 2:
+            media_col = db_df.columns[0]
+            type_col = db_df.columns[1]
+            media_type_map = dict(zip(db_df[media_col].astype(str).str.strip(), db_df[type_col].astype(str).str.strip()))
     except Exception as e:
         st.sidebar.error(f"❌ 讀取 database.csv 失敗: {e}")
 
@@ -241,7 +249,20 @@ def render_airplane_progress(percent, text=""):
     """
     return html_code
 
-def run_news_pipeline(office, staff_name, org, keyword, year, db_df, GEMINI_API_KEY):
+def lookup_media_type(media_name, media_map):
+    """本地字典模糊與精準比對媒體類別"""
+    m_name = str(media_name).strip()
+    if m_name in media_map:
+        return media_map[m_name]
+    
+    # 模糊比對
+    for k, v in media_map.items():
+        if k in m_name or m_name in k:
+            return v
+            
+    return "非三大報全國性" # 預設預備類別
+
+def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_API_KEY):
     # 紀錄檢索歷史
     st.session_state["search_history"].append({
         "檢索時間": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -251,12 +272,6 @@ def run_news_pipeline(office, staff_name, org, keyword, year, db_df, GEMINI_API_
         "關鍵字": keyword,
         "目標年份": year
     })
-
-    db_context = ""
-    if db_df is not None and not db_df.empty:
-        # 將整份 database.csv 的對照資料轉為 JSON 供 AI 參考
-        clean_db = db_df.to_dict(orient="records")
-        db_context = json.dumps(clean_db, ensure_ascii=False)
 
     search_query = f"{org} {keyword}"
     encoded_query = urllib.parse.quote(search_query)
@@ -295,41 +310,42 @@ def run_news_pipeline(office, staff_name, org, keyword, year, db_df, GEMINI_API_
     results = []
     client = genai.Client(api_key=GEMINI_API_KEY)
     
-    batch_size = 10
+    # 調降為小批次，有效降低每分鐘 Token 與 API Limit
+    batch_size = 5
     batches = [raw_results[i:i + batch_size] for i in range(0, len(raw_results), batch_size)]
     
     # 建立飛機進度條動態佔位容器
     progress_placeholder = st.empty()
     progress_placeholder.markdown(
-        render_airplane_progress(0, f"🤖 Gemini 正在精準篩選 {year} 年份報導並對照媒體分類..."), 
+        render_airplane_progress(0, f"🤖 Gemini 正在精準篩選 {year} 年份報導並處理資料..."), 
         unsafe_allow_html=True
     )
     
     for idx, batch in enumerate(batches, start=1):
+        # 精簡 Payload 避免 Token 過載
+        batch_payload = [
+            {"id": i, "title": item["title"], "date": item["date"], "media_name": item["media_name"]} 
+            for i, item in enumerate(batch)
+        ]
+
         prompt = f"""
-        媒體數據庫對照清單 (包含媒體名稱與媒體類型，如「三大報全國性」、「非三大報全國性」)：
-        {db_context}
+        待處理新聞資料：
+        {json.dumps(batch_payload, ensure_ascii=False)}
 
-        原始新聞資料：
-        {json.dumps(batch, ensure_ascii=False)}
-
-        請執行以下分析與篩選任務：
-        1. 篩選標題或內容包含「{org}」與「{keyword}」的新聞。
+        請篩選並清理資料：
+        1. 標題或內容必須包含「{org}」或「{keyword}」。
         2. 發布年份必須為『{year}』年。
-        3. 清除標題中的媒體名稱後綴（例如「 - 自由時報」）。
-        4. 比對媒體數據庫對照清單：
-           - 依據原始新聞的媒體名稱，匹配數據庫中的「媒體類型」（例如：「三大報全國性」、「非三大報全國性」）。
-           - 若數據庫中找不到對應的媒體名稱，請預設填寫「網路媒體」。
+        3. 清除標題後方附帶的媒體名稱後綴（如「 - 自由時報」）。
+        4. 提取記者姓名（若無請填 '編輯部'）。
 
-        請嚴格回傳 JSON 格式：
+        輸出 JSON 格式：
         {{
             "articles": [
                 {{
+                    "id": 0,
                     "media_name": "媒體名稱",
-                    "media_type": "媒體類型 (如: 三大報全國性 / 非三大報全國性 / 網路媒體)",
                     "title": "純標題",
-                    "reporter": "記者姓名 (若無填 '編輯部')",
-                    "url": "新聞連結"
+                    "reporter": "記者姓名"
                 }}
             ]
         }}
@@ -337,10 +353,10 @@ def run_news_pipeline(office, staff_name, org, keyword, year, db_df, GEMINI_API_
         
         max_retries = 3
         success = False
+        last_err = ""
         
         for attempt in range(1, max_retries + 1):
             try:
-                # 增加 API 請求次數紀錄
                 st.session_state["api_count_today"] += 1
                 
                 response = client.models.generate_content(
@@ -349,28 +365,46 @@ def run_news_pipeline(office, staff_name, org, keyword, year, db_df, GEMINI_API_
                     config=types.GenerateContentConfig(response_mime_type="application/json")
                 )
                 res_data = json.loads(response.text)
-                results.extend(res_data.get("articles", []))
+                parsed = res_data.get("articles", [])
+                
+                for art in parsed:
+                    art_id = art.get("id", -1)
+                    if 0 <= art_id < len(batch):
+                        m_name = art.get("media_name") or batch[art_id]["media_name"]
+                        
+                        # 使用 Python 本地字典比對媒體類別，省極大 Token
+                        m_type = lookup_media_type(m_name, media_map)
+                        
+                        results.append({
+                            "media_name": m_name,
+                            "media_type": m_type,
+                            "title": art.get("title", batch[art_id]["title"]),
+                            "reporter": art.get("reporter", "編輯部"),
+                            "url": batch[art_id]["url"]
+                        })
+
                 success = True
                 break
             except Exception as e:
-                st.toast(f"⏳ 第 {idx}/{len(batches)} 批次觸發頻率限制，自動等待 60 秒重試 (嘗試 {attempt}/{max_retries})...", icon="⏳")
-                time.sleep(60)
+                last_err = str(e)
+                st.toast(f"⏳ 第 {idx}/{len(batches)} 批次觸發限制，等待 15 秒重試 ({attempt}/{max_retries})...", icon="⏳")
+                time.sleep(15)
         
         if not success:
-            st.warning(f"⚠️ 第 {idx} 批次於多次重試後依然失敗，已跳過該批次。")
+            st.warning(f"⚠️ 第 {idx} 批次解析失敗 ({last_err[:80]})，已自動跳過。")
             
         current_pct = int((idx / len(batches)) * 100)
         progress_placeholder.markdown(
             render_airplane_progress(current_pct, f"🤖 Gemini 正在處理第 {idx}/{len(batches)} 批次新聞資料..."), 
             unsafe_allow_html=True
         )
-        time.sleep(2.0)
+        time.sleep(1.5) # 批次緩衝間隔，保護 API
         
     progress_placeholder.empty()
     return results
 
 # ---------------------------------------------------------------------------
-# 6. 主控台介面 (包含選取服務處與輸入條件)
+# 6. 主控台介面
 # ---------------------------------------------------------------------------
 if sidebar_option == "主控台 / 檢索系統":
     if not api_key:
@@ -407,7 +441,7 @@ if sidebar_option == "主控台 / 檢索系統":
         elif not target_org or not search_keyword or not target_year:
             st.error("⚠️ 請完整填寫搜尋條件！")
         else:
-            results = run_news_pipeline(selected_office, staff_name, target_org, search_keyword, target_year, db_df, api_key)
+            results = run_news_pipeline(selected_office, staff_name, target_org, search_keyword, target_year, media_type_map, api_key)
             
             if not results:
                 st.warning(f"🔍 未找到符合條件的 {target_year} 年新聞報導 (或因 API 額度限制未能順利解析)。")
@@ -424,7 +458,7 @@ if sidebar_option == "主控台 / 檢索系統":
                 df_display["服務處"] = selected_office
                 df_display["檢索同工"] = staff_name
                 
-                # 調整輸出欄位順序（加入媒體類型欄位）
+                # 調整欄位順序（加入媒體類型欄位）
                 df_export = df_display[["服務處", "檢索同工", "media_name", "media_type", "title", "reporter", "url"]].copy()
                 df_export.columns = ["服務處", "檢索同工", "媒體名稱", "媒體類型", "新聞標題", "記者", "新聞連結"]
                 
@@ -443,7 +477,7 @@ if sidebar_option == "主控台 / 檢索系統":
                     df_export.to_excel(writer, index=False, sheet_name='輿情報導')
                     
                     worksheet = writer.sheets['輿情報導']
-                    # 新聞連結位在第 G 欄（第 7 欄），專門設定點擊超連結
+                    # 新聞連結位在第 G 欄（第 7 欄）
                     for row_idx, url in enumerate(df_export['新聞連結'], start=2):
                         cell = worksheet.cell(row=row_idx, column=7)
                         cell.hyperlink = url
@@ -453,7 +487,7 @@ if sidebar_option == "主控台 / 檢索系統":
                     worksheet.column_dimensions['A'].width = 18  # 服務處
                     worksheet.column_dimensions['B'].width = 12  # 檢索同工
                     worksheet.column_dimensions['C'].width = 18  # 媒體名稱
-                    worksheet.column_dimensions['D'].width = 18  # 媒體類型 (三大報/非三大報等)
+                    worksheet.column_dimensions['D'].width = 18  # 媒體類型
                     worksheet.column_dimensions['E'].width = 45  # 新聞標題
                     worksheet.column_dimensions['F'].width = 12  # 記者
                     worksheet.column_dimensions['G'].width = 35  # 新聞連結
