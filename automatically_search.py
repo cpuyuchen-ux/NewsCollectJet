@@ -134,11 +134,11 @@ def run_news_pipeline(org, keyword, year, db_df, GEMINI_API_KEY):
         }}
         """
         try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
+           response = client.models.generate_content(
+    model="gemini-1.5-flash",
+    contents=prompt,
+    config=types.GenerateContentConfig(response_mime_type="application/json")
+)
             res_data = json.loads(response.text)
             results.extend(res_data.get("articles", []))
         except Exception as e:
