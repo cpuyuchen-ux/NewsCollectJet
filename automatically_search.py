@@ -121,31 +121,26 @@ if sidebar_option == "系統簡介":
     st.info("""
     **彰化家扶中心輿情自動檢索與報表生成系統** 旨在幫助同工快速彙整網路媒體報導。
     * **即時檢索**：自動抓取 Google News 最新相關新聞。
-    * **AI 結合「本地備用演算法」**：優先使用 Gemini 1.5 Flash 進行精準解析；若 API 限流則自動啟動「本地防爆演算法」，保障 100% 順利產出搜索結果。
-    * **模組化減速**：批次發送檢索請求，避免觸發 Google 反爬蟲機制 (Anti-Scraping)。
-    * **一鍵報表**：自動產出包含超連結的標準化 Excel 檔案，提升行政與輿情整理效率。
+    * **AI + 本地備用演算法**：優先使用 Gemini 1.5 Flash 進行精準解析；若 API 限流則自動啟動「本地防爆演算法」，保障 100% 順利產出。
     """)
 
 elif sidebar_option == "系統須知":
     st.subheader("📌 系統須知與使用規範")
     st.warning("""
-    1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用，嚴禁用於商業爬蟲、網路攻擊或任何非法用途。
-    2. **API 額度雙保險機制**：Gemini 2.0 Flash 免費層級（Free Tier）通常有嚴格的 RPM（每分鐘請求數）與 TPM（每分鐘 Token 數）限制。請避免短時間內頻繁發送大規模檢索請求，以免觸發 API 限流或配額耗盡。若仍遇到 429 配額額滿，會自動無縫轉入「本地純文字演算法」，確保資料不遺漏！
-    3. **資料準確性**：AI 自動解析結果僅供參考，匯出報表後建議人工進行二次核對。
-    4. **中心PDF檔留存**：報表生成後，請將每一篇報導儲存成PDF檔，放置於中心查報資料夾。
-    5. **人工調整格式**：報表生成後，請配合將資料貼進總會「2026年單位季報_媒體統計格式」之 excel 檔。
-    6. **非網路新聞補充**：本系統僅能抓取網路電子新聞，紙本報紙、廣播、電視露出請務必人工補充。
+    1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用。
+    2. **API 額度雙保險機制**：系統採用 Gemini 1.5 Flash 模型，若仍遇到 429 配額額滿，會自動無縫轉入「本地純文字演算法」，確保資料不遺漏！
+    3. **非網路新聞補充**：紙本報紙、廣播、電視露出請務必人工補充。
     """)
 
 elif sidebar_option == "系統管理員":
     st.subheader("🔐 系統管理員後台")
     admin_key = st.text_input("🔑 請輸入管理員金鑰：", type="password")
     if admin_key == "Automation_initiator114077":
-        st.success("🔓 驗證成功，歡迎進入管理員後台！")
+        st.success("🔓 驗證成功！")
         col_m1, col_m2, col_m3 = st.columns(3)
         col_m1.metric("📅 今日日期", str(st.session_state["last_api_date"]))
         col_m2.metric("📡 今日 API 請求次數", f"{st.session_state['api_count_today']} 次")
-        col_m3.metric("📊 累積檢索次數", f"{len(st.session_state['search_history'])} 筆")
+        col_m3.metric("🔍 累積檢索次數", f"{len(st.session_state['search_history'])} 筆")
         
         if st.session_state["search_history"]:
             history_df = pd.DataFrame(st.session_state["search_history"])
@@ -305,7 +300,7 @@ if sidebar_option == "主控台 / 檢索系統":
         # 第一排：服務處與同工姓名
         row1_col1, row1_col2 = st.columns(2)
         with row1_col1:
-            selected_office = st.selectbox("🏢 篩選服務處", ["全部", "和美兒童館", "員林服務處", "田中服務處", "彰化服務處", "二林服務處", "中心行政組"])
+            selected_office = st.selectbox("🏢 篩選服務處", ["彰化分事務所", "和美兒童館", "員林服務處", "田中服務處", "彰化服務處", "二林服務處", "中心行政組"])
         with row1_col2:
             staff_name = st.text_input("👤 同工姓名", placeholder="e.g. 家扶小幫手")
 
