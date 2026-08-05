@@ -1,7 +1,5 @@
-Plaintext
-
 streamlit
 pandas
 openpyxl
-duckduckgo-search
+duckduckgo-search==7.3.2
 google-genai
