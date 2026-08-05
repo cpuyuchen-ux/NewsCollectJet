@@ -118,7 +118,9 @@ st.markdown("""
 <div class="warning-bar">
     <p class="warning-text">※此系統為個人自主開發，請勿用做非法行為😈
     <p class="warning-text">※檢索資料庫為「彰化家扶」常見出報媒體，資料庫將不定期更新👀
-</div>
+
+</div> 
+""", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # 3. 側邊欄下拉式選單與模組控制
