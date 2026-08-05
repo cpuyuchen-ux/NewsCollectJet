@@ -175,7 +175,7 @@ def lookup_media_type(media_name, media_map):
     return "非三大報全國性"
 
 def clean_title_local(title, media_name):
-    """方案三：本地純 Python 標題清理演算法 (不用 AI 也能剔除標題後綴)"""
+    """本地純 Python 標題清理演算法 (不用 AI 也能剔除標題後綴)"""
     cleaned = re.sub(r'\s*-\s*.*$', '', title) # 剔除 - 自由時報
     cleaned = re.sub(r'｜.*$', '', cleaned)    # 剔除 ｜ 聯合新聞網
     cleaned = re.sub(r'\|.*$', '', cleaned)
@@ -215,7 +215,6 @@ def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_
     results = []
     client = genai.Client(api_key=GEMINI_API_KEY)
     
-    # 小批次處理，降低單次 API 負擔
     batch_size = 5
     batches = [raw_results[i:i + batch_size] for i in range(0, len(raw_results), batch_size)]
     
@@ -243,7 +242,6 @@ def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_
             try:
                 st.session_state["api_count_today"] += 1
                 
-                # 方案一：改用額度較充裕且獨立計算的 gemini-1.5-flash
                 response = client.models.generate_content(
                     model="gemini-1.5-flash",
                     contents=prompt,
@@ -266,10 +264,8 @@ def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_
                 success = True
                 break
             except Exception as e:
-                # 遇到頻率限制，短暫等待後重試
                 time.sleep(2)
         
-        # 方案三（保底）：若 AI API 依然爆掉 (429/500/Timeout)，無縫切換為 Python 本地純文字演算法！
         if not success:
             st.toast(f"⚡ 第 {idx} 批次 API 限流，已自動啟動「本地演算法」解析！", icon="⚡")
             for item in batch:
@@ -284,7 +280,7 @@ def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_
             
         current_pct = int((idx / len(batches)) * 100)
         progress_placeholder.markdown(render_airplane_progress(current_pct, f"🛫 正在處理第 {idx}/{len(batches)} 批次..."), unsafe_allow_html=True)
-        time.sleep(1) # 緩衝間隔，維護 API 健康
+        time.sleep(1)
         
     progress_placeholder.empty()
     return results
@@ -301,25 +297,27 @@ if sidebar_option == "主控台 / 檢索系統":
         st.markdown('<div class="search-card">', unsafe_allow_html=True)
         st.subheader("🔍 設定檢索條件")
         
+        # 第一排：服務處與同工姓名
         row1_col1, row1_col2 = st.columns(2)
         with row1_col1:
-            selected_office = st.selectbox("🏢 篩選服務處", ["彰化分事務所", "和美兒童館", "員林服務處", "田中服務處", "彰化服務處", "二林服務處", "中心行政組"])
+            selected_office = st.selectbox("🏢 篩選服務處", ["全部", "和美兒童館", "員林服務處", "田中服務處", "彰化服務處", "二林服務處", "中心行政組"])
         with row1_col2:
-            staff_name = st.text_input("👤 同工姓名", placeholder="請輸入同工姓名")
+            staff_name = st.text_input("👤 同工姓名", placeholder="e.g. 家扶小幫手")
 
+        # 第二排：改為浮水印（placeholder）提示
         row2_col1, row2_col2, row2_col3 = st.columns(3)
         with row2_col1:
-            target_org = st.text_input("🏢 機構 / 品牌名稱", value="彰化家扶")
+            target_org = st.text_input("🏢 機構 / 品牌名稱", placeholder="e.g. 彰化家扶")
         with row2_col2:
-            search_keyword = st.text_input("🔑 搜尋關鍵字", value="課輔班")
+            search_keyword = st.text_input("🔑 搜尋關鍵字", placeholder="e.g. 課輔班、相見歡")
         with row2_col3:
-            target_year = st.text_input("📅 目標年份 (YYYY)", value="2026")
+            target_year = st.text_input("📅 目標年份 (YYYY)", placeholder="e.g. 2026")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
     if st.button("🚀 開始自動化檢索與解析", type="primary", use_container_width=True):
         if not staff_name or not target_org or not search_keyword or not target_year:
-            st.error("⚠️ 請完整填寫搜尋條件！")
+            st.error("⚠️ 請完整填寫所有欄位條件！")
         else:
             results = run_news_pipeline(selected_office, staff_name, target_org, search_keyword, target_year, media_type_map, api_key)
             
