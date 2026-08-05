@@ -7,7 +7,6 @@ import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from bs4 import BeautifulSoup
 import pandas as pd
 import streamlit as st
 from google import genai
@@ -74,7 +73,7 @@ st.markdown("""
 # 2. 標題與警示橫幅區塊
 # ---------------------------------------------------------------------------
 st.markdown('<div class="main-header">📰 彰化家扶中心輿情自動檢索與報表生成系統</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">自動整合 Google News 即時新聞，並透過 Python 與 Gemini AI 自動進行記者解析與格式化</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">自動整合 Google News 即時新聞，並透過 Gemini AI 自動進行年份對齊與格式化</div>', unsafe_allow_html=True)
 
 st.markdown("""
 <div class="warning-bar">
@@ -122,16 +121,20 @@ if sidebar_option == "系統簡介":
     st.info("""
     **彰化家扶中心輿情自動檢索與報表生成系統** 旨在幫助同工快速彙整網路媒體報導。
     * **即時檢索**：自動抓取 Google News 最新相關新聞。
-    * **Python 深度網頁爬取**：自動點進新聞頁面，透過多重 Regex 與 HTML DOM 解析精準擷取記者姓名。
-    * **一鍵報表**：自動產出包含超連結的標準化 Excel 檔案。
+    * **AI 結合「本地備用演算法」**：優先使用 Gemini 進行精準解析；若 API 限流則自動啟動「本地防爆演算法」，保障 100% 順利產出搜索結果。
+    * **模組化減速**：批次發送檢索請求，避免觸發 Google 反爬蟲機制 (Anti-Scraping)。
+    * **一鍵報表**：自動產出包含超連結的標準化 Excel 檔案，提升行政與輿情整理效率。
     """)
 
 elif sidebar_option == "系統須知":
     st.subheader("📌 系統須知與使用規範")
     st.warning("""
-    1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用。
-    2. **中心PDF檔留存**：報表生成後，請將每一篇報導儲存成PDF檔，放置於中心查報資料夾。
-    3. **人工調整格式**：報表生成後，請配合將資料貼進總會「2026年單位季報_媒體統計格式」之 excel 檔。
+    1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用，嚴禁用於商業爬蟲、網路攻擊或任何非法用途。
+    2. **API 額度雙保險機制**：Gemini 免費層級（Free Tier）通常有嚴格的 RPM（每分鐘請求數）與 TPM（每分鐘 Token 數）限制。請避免短時間內頻繁發送大規模檢索請求，以免觸發 API 限流或配額耗盡。若仍遇到 429 配額額滿，會自動無縫轉入「本地純文字演算法」，確保資料不遺漏！
+    3. **資料準確性**：AI 自動解析結果僅供參考，匯出報表後建議人工進行二次核對。
+    4. **中心PDF檔留存**：報表生成後，請將每一篇報導儲存成PDF檔，放置於中心查報資料夾。
+    5. **人工調整格式**：報表生成後，請配合將資料貼進總會「2026年單位季報_媒體統計格式」之 excel 檔。
+    6. **非網路新聞補充**：本系統僅能抓取網路電子新聞，紙本報紙、廣播、電視露出請務必人工補充。
     """)
 
 elif sidebar_option == "系統管理員":
@@ -147,9 +150,11 @@ elif sidebar_option == "系統管理員":
         if st.session_state["search_history"]:
             history_df = pd.DataFrame(st.session_state["search_history"])
             st.dataframe(history_df, use_container_width=True)
+    elif admin_key:
+        st.error("❌ 金鑰錯誤！")
 
 # ---------------------------------------------------------------------------
-# 5. 核心 Python 記者抓取與標題清理邏輯
+# 5. 核心邏輯：方案一 (Gemini Flash) + 方案三 (Python 本地防爆與記者偵測)
 # ---------------------------------------------------------------------------
 def render_airplane_progress(percent, text=""):
     return f"""
@@ -174,83 +179,37 @@ def lookup_media_type(media_name, media_map):
             return v
     return "非三大報全國性"
 
-def extract_reporter_by_regex(text):
-    """強化的 Python 正則表達式匹配引擎"""
-    if not text:
-        return None
-        
+def clean_title_and_extract_reporter_local(title, media_name):
+    """
+    第二防線（本地 Python 正則表達式 Regex 演算法）：
+    1. 從標題/內文中自動比對 記者/撰文/編輯 [姓名] (報導)? 語法，提取 2~4 字中文姓名。
+    2. 若無法比對成功，統一帶入 '編輯部'。
+    3. 清理標題，剔除記者前綴標記與後綴媒體名稱。
+    """
+    reporter = "編輯部"
+    
+    # 強化的正則表達式，涵蓋臺灣新聞常見的記者標記格式
     reporter_patterns = [
         r'[〔\[\(]?(?:記者|專題記者|特派記者)\s*([\u4e00-\u9fa5]{2,4})\s*[\/／\s]',  # 〔記者張三／彰化報導〕
-        r'(?:記者|特派記者)\s*([\u4e00-\u9fa5]{2,4})\s*(?:報導|攝|電)',            # 記者李四報導
-        r'([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*(?:彰化|綜合|地方|台北|台中|高雄|報導)',# 王五／彰化報導
-        r'(?:文|撰文|責任編輯|編輯|攝影)[\/／:\s]\s*([\u4e00-\u9fa5]{2,4})',       # 文／趙六 或 責任編輯：趙六
-        r'[〔\[\(]\s*([\u4e00-\u9fa5]{2,4})\s*(?:採訪報導|報導)\s*[〕\]\)]',      # 〔孫七採訪報導〕
-        r'記者\s*([\u4e00-\u9fa5]{2,4})'                                       # 記者張三
+        r'(?:記者|特派記者)\s*([\u4e00-\u9fa5]{2,4})\s*報導',                     # 記者李四報導
+        r'([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*(?:彰化|綜合|地方|台北|台中|報導)',   # 王五／彰化報導
+        r'(?:文|撰文|責任編輯|編輯|攝影)[\/／]\s*([\u4e00-\u9fa5]{2,4})',           # 文／趙六 或 撰文/趙六
+        r'[〔\[\(]\s*([\u4e00-\u9fa5]{2,4})\s*(?:採訪報導|報導)\s*[〕\]\)]'        # 〔孫七採訪報導〕
     ]
+    
     for pattern in reporter_patterns:
-        match = re.search(pattern, text)
+        match = re.search(pattern, title)
         if match:
-            name = match.group(1).strip()
-            # 排除常見非人名的誤抓字詞
-            if name not in ["彰化", "報導", "綜合", "地方", "新聞", "中央社", "家扶"]:
-                return name
-    return None
+            reporter = match.group(1).strip()
+            break
 
-def python_fetch_reporter_from_url(url, title):
-    """
-    Python 獨立抓取邏輯：
-    1. 優先從標題比對
-    2. 若標題無記者，點進新聞網頁解析 Meta 標籤與 HTML 內文
-    """
-    # 步驟 1: 先從標題比對
-    reporter_from_title = extract_reporter_by_regex(title)
-    if reporter_from_title:
-        return reporter_from_title
-
-    # 步驟 2: 連線抓取網頁內容
-    try:
-        req = urllib.request.Request(url, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        })
-        with urllib.request.urlopen(req, timeout=4) as response:
-            html = response.read().decode('utf-8', errors='ignore')
-            soup = BeautifulSoup(html, 'html.parser')
-            
-            # (A) 檢查 HTML Meta author 標籤
-            meta_author = soup.find('meta', {'name': re.compile(r'author|reporter|dable:author', re.I)})
-            if meta_author and meta_author.get('content'):
-                rep = extract_reporter_by_regex(meta_author['content'])
-                if rep:
-                    return rep
-                elif len(meta_author['content'].strip()) <= 4:
-                    return meta_author['content'].strip()
-
-            # (B) 檢查常見新聞網站的記者 Class 區塊
-            author_nodes = soup.select('.author, .reporter, .article-author, .author-name, .article-content__author')
-            for node in author_nodes:
-                rep = extract_reporter_by_regex(node.get_text())
-                if rep:
-                    return rep
-
-            # (C) 抓取新聞前幾段 P 標籤內文進行比对
-            paragraphs = soup.find_all('p')
-            first_text = " ".join([p.get_text() for p in paragraphs[:5]])
-            rep = extract_reporter_by_regex(first_text)
-            if rep:
-                return rep
-
-    except Exception:
-        pass  # 若發生 Timeout 或封鎖則跳過
-
-    return "編輯部"
-
-def clean_title_python(title):
-    """Python 清理新聞標題」"""
+    # 剔除標題中常見的記者括號資訊與後綴媒體名稱，保留乾淨標題
     cleaned = re.sub(r'[\(\[\〔].*?(?:記者|報導|文|圖|攝影|編輯).*?[\)\]\〕]', '', title)
     cleaned = re.sub(r'\s*-\s*.*$', '', cleaned)     # 剔除 - 自由時報
     cleaned = re.sub(r'｜.*$', '', cleaned)          # 剔除 ｜ 聯合新聞網
     cleaned = re.sub(r'\|.*$', '', cleaned)
-    return cleaned.strip()
+    
+    return cleaned.strip(), reporter
 
 def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_API_KEY):
     st.session_state["search_history"].append({
@@ -284,31 +243,79 @@ def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_
         return []
 
     results = []
-    total_items = len(raw_results)
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    
+    batch_size = 5
+    batches = [raw_results[i:i + batch_size] for i in range(0, len(raw_results), batch_size)]
     
     progress_placeholder = st.empty()
-    progress_placeholder.markdown(render_airplane_progress(0, f"🔎 Python 啟動網頁內文爬取與記者偵測 (共 {total_items} 筆)..."), unsafe_allow_html=True)
+    progress_placeholder.markdown(render_airplane_progress(0, f"🤖 開始處理新聞資料 (共 {len(batches)} 批次)..."), unsafe_allow_html=True)
     
-    # 全部由 Python 進行高精準度記者處理與標題清理
-    for idx, item in enumerate(raw_results, start=1):
-        # 1. 由 Python 直接進入網頁抓取記者
-        detected_reporter = python_fetch_reporter_from_url(item["url"], item["title"])
-        # 2. 清理標題
-        cleaned_title = clean_title_python(item["title"])
-        # 3. 媒體類別對照
-        m_type = lookup_media_type(item["media_name"], media_map)
+    for idx, batch in enumerate(batches, start=1):
+        batch_payload = [
+            {"id": i, "title": item["title"], "date": item["date"], "media_name": item["media_name"]} 
+            for i, item in enumerate(batch)
+        ]
+
+        # 第一防線（Gemini 1.5 Flash）：強化 Prompt 指示
+        prompt = f"""
+        新聞列表：{json.dumps(batch_payload, ensure_ascii=False)}
+        條件：發布年份須為 {year}，標題或內容需包含 {org} 或 {keyword}。
+        請執行以下兩件事：
+        1. 去除新聞標題末端的媒體名稱後綴（如「 - 自由時報」、「｜ 聯合新聞網」）與括號內的記者前綴標記。
+        2. 優先精準辨識與提取記者姓名（常見格式如：「記者張三」、「記者李四報導」、「王五／彰化報導」、「文／趙六」、「〔記者孫七／彰化報導〕」等），請只提取 2~4 字的中文姓名。若標題中無明確記者姓名，請統一填寫 '編輯部'。
+
+        傳回 JSON 格式：
+        {{"articles": [{{"id": 0, "media_name": "媒體名稱", "title": "純新聞標題", "reporter": "記者姓名"}}]}}
+        """
         
-        results.append({
-            "media_name": item["media_name"],
-            "media_type": m_type,
-            "title": cleaned_title,
-            "reporter": detected_reporter,
-            "url": item["url"]
-        })
+        max_retries = 2
+        success = False
         
-        pct = int((idx / total_items) * 100)
-        progress_placeholder.markdown(render_airplane_progress(pct, f"🛫 正在抓取第 {idx}/{total_items} 筆新聞內文與記者資訊..."), unsafe_allow_html=True)
-        time.sleep(0.1)
+        for attempt in range(1, max_retries + 1):
+            try:
+                st.session_state["api_count_today"] += 1
+                
+                response = client.models.generate_content(
+                    model="gemini-1.5-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                res_data = json.loads(response.text)
+                parsed = res_data.get("articles", [])
+                
+                for art in parsed:
+                    art_id = art.get("id", -1)
+                    if 0 <= art_id < len(batch):
+                        m_name = art.get("media_name") or batch[art_id]["media_name"]
+                        results.append({
+                            "media_name": m_name,
+                            "media_type": lookup_media_type(m_name, media_map),
+                            "title": art.get("title", batch[art_id]["title"]),
+                            "reporter": art.get("reporter", "編輯部"),
+                            "url": batch[art_id]["url"]
+                        })
+                success = True
+                break
+            except Exception as e:
+                time.sleep(2)
+        
+        # 若 API 呼叫失敗或限流，啟用第二防線（本地 Regex 演算法）
+        if not success:
+            st.toast(f"⚡ 第 {idx} 批次 API 限流，已自動啟動「本地 Regex 演算法」進行記者偵測與解析！", icon="⚡")
+            for item in batch:
+                c_title, c_reporter = clean_title_and_extract_reporter_local(item["title"], item["media_name"])
+                results.append({
+                    "media_name": item["media_name"],
+                    "media_type": lookup_media_type(item["media_name"], media_map),
+                    "title": c_title,
+                    "reporter": c_reporter,
+                    "url": item["url"]
+                })
+            
+        current_pct = int((idx / len(batches)) * 100)
+        progress_placeholder.markdown(render_airplane_progress(current_pct, f"🛫 正在處理第 {idx}/{len(batches)} 批次..."), unsafe_allow_html=True)
+        time.sleep(1)
         
     progress_placeholder.empty()
     return results
@@ -325,12 +332,14 @@ if sidebar_option == "主控台 / 檢索系統":
         st.markdown('<div class="search-card">', unsafe_allow_html=True)
         st.subheader("🔍 設定檢索條件")
         
+        # 第一排：服務處與同工姓名
         row1_col1, row1_col2 = st.columns(2)
         with row1_col1:
             selected_office = st.selectbox("🏢 篩選服務處", ["全部", "和美兒童館", "員林服務處", "田中服務處", "彰化服務處", "二林服務處", "中心行政組"])
         with row1_col2:
             staff_name = st.text_input("👤 同工姓名", placeholder="e.g. 家扶小幫手")
 
+        # 第二排：關鍵字設定
         row2_col1, row2_col2, row2_col3 = st.columns(3)
         with row2_col1:
             target_org = st.text_input("🏢 機構 / 品牌名稱", placeholder="e.g. 彰化家扶")
@@ -357,7 +366,8 @@ if sidebar_option == "主控台 / 檢索系統":
                 df_display["服務處"] = selected_office
                 df_display["檢索同工"] = staff_name
                 
-                # 欄位順序：A:媒體名稱 | B:新聞標題 | C:新聞連結 | D:記者姓名 | E:媒體類型 | F:服務處 | G:檢索同工
+                # 順序 3. 調整欄位順序：
+                # A欄: 媒體名稱 | B欄: 新聞標題 | C欄: 新聞連結 | D欄: 記者姓名 | E欄: 媒體類型 | F欄: 服務處 | G欄: 檢索同工
                 df_export = df_display[["media_name", "title", "url", "reporter", "media_type", "服務處", "檢索同工"]].copy()
                 df_export.columns = ["媒體名稱", "新聞標題", "新聞連結", "記者姓名", "媒體類型", "服務處", "檢索同工"]
                 
@@ -367,6 +377,7 @@ if sidebar_option == "主控台 / 檢索系統":
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     df_export.to_excel(writer, index=False, sheet_name='輿情報導')
                     worksheet = writer.sheets['輿情報導']
+                    # C欄 (第 3 欄) 為新聞連結，為其設定 Excel 可點擊的超連結格式
                     for row_idx, url in enumerate(df_export['新聞連結'], start=2):
                         cell = worksheet.cell(row=row_idx, column=3)
                         cell.hyperlink = url
