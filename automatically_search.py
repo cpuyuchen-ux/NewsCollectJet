@@ -167,7 +167,7 @@ if sidebar_option == "系統簡介":
     """)
 
 # --- 模組 B：系統須知 ---
-elif sidebar_option == "系統須知與使用規範":
+elif sidebar_option == "系統須知":
     st.subheader("📌 系統須知與使用規範")
     st.warning("""
     1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用，嚴禁用於商業爬蟲、網路攻擊或任何非法用途。
