@@ -1,123 +1,109 @@
-# ========================================================
-# 單位專屬新聞搜尋引擎 Web App (AI 年份精準篩選與權限控管版)
-# ========================================================
-
-import os
-import json
 import io
+import json
 import time
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 import pandas as pd
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 import streamlit as st
-from duckduckgo_search import DDGS
 from google import genai
 from google.genai import types
 
 # ---------------------------------------------------------------------------
-# 1. 網頁基本設定與管理者密碼設定
+# 1. 頁面配置與標題
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="單位專屬新聞搜尋引擎", page_icon="📰", layout="wide")
+st.set_page_config(page_title="輿情新聞自動化檢索系統", page_icon="📰", layout="wide")
 
-st.title("📰 單位專屬輿情新聞搜尋引擎")
-st.caption("結合內部數據庫、DuckDuckGo 與 Gemini AI，自動檢索並整理格式化新聞報導。")
-
-# 🔒 請在此設定您的專屬管理者密碼 (可自行修改)
-ADMIN_PASSWORD = "Automation_initiator114077"
-
-# 初始化 Session State (紀錄權限與數據庫)
-if "is_admin" not in st.session_state:
-    st.session_state["is_admin"] = False
-if "active_db_df" not in st.session_state:
-    st.session_state["active_db_df"] = None
-
-# 讀取 GEMINI_API_KEY (優先從 Streamlit Secrets 讀取，其次從環境變數)
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY") if "GEMINI_API_KEY" in st.secrets else os.environ.get("GEMINI_API_KEY")
-
-if not GEMINI_API_KEY:
-    st.error("⚠️ 未偵測到 GEMINI_API_KEY！部署至雲端時請於 Secrets 設定，本地執行請設定環境變數。")
+st.title("📰 輿情新聞自動化檢索與報表生成系統")
+st.caption("自動經由 Google News RSS 抓取新聞，並運用 Gemini AI 精準篩選年份與格式化")
 
 # ---------------------------------------------------------------------------
-# 2. 側邊欄：搜尋條件與管理者解鎖控制
+# 2. 金鑰與資料庫管理者側邊欄
 # ---------------------------------------------------------------------------
-with st.sidebar:
-    st.header("🔍 新聞檢索條件")
-    
-    target_org = st.text_input("單位名稱", value="家扶")
-    event_keyword = st.text_input("事件/活動關鍵字", value="麗寶樂園")
-    target_year = st.selectbox("目標年份", options=[2026, 2025, 2024, 2023], index=0)
-    
-    # 搜尋按鈕
-    search_submitted = st.button("🚀 開始搜尋輿情", type="primary", use_container_width=True)
+st.sidebar.header("⚙️ 系統設定")
 
-    st.divider()
+# 讀取 API Key (優先讀取 Secrets)
+api_key = st.secrets.get("GEMINI_API_KEY", "")
+if not api_key:
+    api_key = st.sidebar.text_input("輸入 Gemini API Key:", type="password")
 
-    # 🔒 管理者權限控管區塊
-    st.subheader("🔐 後台管理權限")
-    
-    if not st.session_state["is_admin"]:
-        input_pwd = st.text_input("輸入管理者密碼以解鎖進階設定", type="password")
-        if st.button("解鎖權限", use_container_width=True):
-            if input_pwd == ADMIN_PASSWORD:
-                st.session_state["is_admin"] = True
-                st.success("🔓 已成功登入管理者模式！")
-                st.rerun()
-            else:
-                st.error("❌ 密碼錯誤！")
-    else:
-        st.success("👑 目前身分：系統管理者 (Admin)")
-        if st.button("🔒 登出管理者權限", use_container_width=True):
-            st.session_state["is_admin"] = False
-            st.rerun()
+if not api_key:
+    st.warning("⚠️ 請先在 Streamlit Secrets 設定 `GEMINI_API_KEY` 或於左側欄位輸入 API Key 以開始使用。")
+    st.stop()
 
-    # ⚙️ 管理者專屬控管面板 (只有管理者看得見)
-    if st.session_state["is_admin"]:
-        st.divider()
-        st.subheader("⚙️ 管理者控制台")
-        st.info("💡 只有您能在此上傳/更新數據庫 CSV。")
-        
-        uploaded_db = st.file_uploader("上傳/更換單位 Database.csv", type=["csv"])
-        if uploaded_db is not None:
+st.sidebar.markdown("---")
+st.sidebar.subheader("🗄️ 內部數據庫 (Database.csv)")
+
+# 管理者密碼解鎖機制 (預設密碼 automation_initiator114077)
+db_df = None
+db_unlocked = st.sidebar.checkbox("🔓 解鎖管理者設定 (上傳 Database.csv)")
+
+if db_unlocked:
+    admin_pwd = st.sidebar.text_input("請輸入管理者密碼:", type="password")
+    if admin_pwd == "automation_initiator114077":
+        st.sidebar.success("驗證成功！")
+        uploaded_db = st.sidebar.file_uploader("上傳 Database.csv 檔", type=["csv"])
+        if uploaded_db:
             try:
-                st.session_state["active_db_df"] = pd.read_csv(uploaded_db)
-                st.success("✅ 數據庫已更新並儲存於當前 Session！")
+                db_df = pd.read_csv(uploaded_db)
+                st.sidebar.info(f"已成功載入內部數據庫，共 {len(db_df)} 筆資料")
             except Exception as e:
-                st.error(f"⚠️ 讀取 CSV 失敗：{e}")
+                st.sidebar.error(f"讀取 Database.csv 失敗: {e}")
+    elif admin_pwd:
+        st.sidebar.error("密碼錯誤")
 
 # ---------------------------------------------------------------------------
-# 3. 核心搜尋與 AI 年份精準過濾邏輯
+# 3. 核心搜尋與 AI 年份精準過濾邏輯 (Google News RSS 串流)
 # ---------------------------------------------------------------------------
-def run_news_pipeline(org, keyword, year, db_df):
+def run_news_pipeline(org, keyword, year, db_df, GEMINI_API_KEY):
     db_context = ""
     if db_df is not None:
         db_context = db_df.to_string(index=False)[:1000]
 
-    # 1. 搜尋關鍵字只放「單位 + 關鍵字」，不放年份以防漏抓新聞
+    # 1. 組合搜尋關鍵字並進行 URL 編碼
     search_query = f"{org} {keyword}"
+    encoded_query = urllib.parse.quote(search_query)
     
-    # A. 爬取新聞 (加入請求延遲緩衝)
+    # 2. 存取 Google News 台灣區中文 RSS 串流 (免費、免金鑰、不限制 IP)
+    rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+    
     raw_results = []
-    with st.spinner(f"正在全網搜尋『{search_query}』相關報導中..."):
-        time.sleep(1)  # 搜尋前緩衝 1 秒，保護 API
+    with st.spinner(f"正在經由 Google News 檢索『{search_query}』新聞報導..."):
         try:
-            with DDGS() as ddgs:
-                ddg_news = list(ddgs.news(keywords=search_query, region="tw-tzh", max_results=100))
-                if ddg_news:
-                    raw_results = ddg_news
+            req = urllib.request.Request(
+                rss_url, 
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                xml_data = response.read()
+                
+            root = ET.fromstring(xml_data)
+            for item in root.findall('.//item'):
+                title = item.find('title').text if item.find('title') is not None else ""
+                link = item.find('link').text if item.find('link') is not None else ""
+                pub_date = item.find('pubDate').text if item.find('pubDate') is not None else ""
+                source = item.find('source').text if item.find('source') is not None else "新聞媒體"
+                
+                raw_results.append({
+                    "title": title,
+                    "url": link,
+                    "date": pub_date,
+                    "media_name": source
+                })
         except Exception as e:
-            st.error(f"搜尋發生異常：{e}")
+            st.error(f"Google News 檢索異常：{e}")
             return []
 
     if not raw_results:
         return []
 
-    # B. AI 分批解析 (交由 Gemini 讀取發布時間 date 並嚴格比對年份)
+    # 3. AI 分批解析 (交由 Gemini 讀取發布時間與內容，精準篩選年份與清整標題)
     results = []
     client = genai.Client(api_key=GEMINI_API_KEY)
     batch_size = 25
     batches = [raw_results[i:i + batch_size] for i in range(0, len(raw_results), batch_size)]
     
-    progress_bar = st.progress(0, text=f"🤖 Gemini 正在精準篩選 {year} 年份報導並進行結構化...")
+    progress_bar = st.progress(0, text=f"🤖 Gemini 正在精準篩選 {year} 年份報導並整理結構...")
     
     for idx, batch in enumerate(batches, start=1):
         prompt = f"""
@@ -126,13 +112,14 @@ def run_news_pipeline(org, keyword, year, db_df):
         {db_context}
         ---
 
-        原始新聞列表 (每則新聞皆包含發布時間 date)：
+        原始新聞列表 (每則新聞包含標題 title、連結 url、媒體 source、發布時間 date)：
         ---
         {json.dumps(batch, ensure_ascii=False)}
         ---
-        請仔細分析資料，並進行精準篩選：
+        請仔細分析資料，並進行精準篩選與整理：
         1. 文章內容或標題必須提及「{org}」與「{keyword}」。
-        2. 檢查新聞的發布日期 (date) 或報導內容，**必須屬於『{year} 年』發布的報導**。若屬於其他年份請務必剔除。
+        2. 檢查新聞的發布日期 (pubDate/date) 或報導內容，**必須屬於『{year} 年』發布的報導**。若屬於其他年份請務必剔除。
+        3. 請將標題中的媒體名稱後綴（例如 "- ETtoday新聞雲" 或 "- 自由時報"）清除，只保留純新聞標題，並將媒體名稱獨立填入 media_name。
 
         輸出 JSON 格式：
         {{
@@ -155,121 +142,78 @@ def run_news_pipeline(org, keyword, year, db_df):
             res_data = json.loads(response.text)
             results.extend(res_data.get("articles", []))
         except Exception as e:
-            st.warning(f"第 {idx} 批次解析稍有延遲：{e}")
+            st.warning(f"第 {idx} 批次 AI 解析稍有延遲：{e}")
             
         progress_bar.progress(idx / len(batches))
-        time.sleep(1.5)  # 每批次間隔 1.5 秒，確保遵循 RPM 限制
+        time.sleep(1.0)
         
     progress_bar.empty()
     return results
 
 # ---------------------------------------------------------------------------
-# 4. 產出指定格式 Excel 記憶體二進位檔 (A:媒體, B:標題+連結, C:記者)
+# 4. 主要 UI 操作介面
 # ---------------------------------------------------------------------------
-def generate_custom_excel(articles_data):
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "新聞輿情彙整"
-    ws.views.sheetView[0].showGridLines = True
+col1, col2, col3 = st.columns(3)
+with col1:
+    target_org = st.text_input("機構/品牌名稱", value="麗寶樂園")
+with col2:
+    search_keyword = st.text_input("搜尋關鍵字", value="斷軌")
+with col3:
+    target_year = st.text_input("指定目標年份 (YYYY)", value="2026")
 
-    # Excel 樣式設定
-    header_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
-    header_font = Font(name="微軟正黑體", size=11, bold=True, color="FFFFFF")
-    body_font = Font(name="微軟正黑體", size=10)
-    link_font = Font(name="微軟正黑體", size=10, color="0000FF", underline="single")
-    thin_border = Border(
-        left=Side(style='thin', color='D9D9D9'),
-        right=Side(style='thin', color='D9D9D9'),
-        top=Side(style='thin', color='D9D9D9'),
-        bottom=Side(style='thin', color='D9D9D9')
-    )
-
-    headers = ["媒體名稱", "報導標題", "記者姓名"]
-    ws.append(headers)
-
-    for col_idx in range(1, 4):
-        cell = ws.cell(row=1, column=col_idx)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[1].height = 25
-
-    # 寫入資料列
-    for row_idx, item in enumerate(articles_data, start=2):
-        ws.row_dimensions[row_idx].height = 22
-        
-        c_a = ws.cell(row=row_idx, column=1, value=item.get("media_name", "未知媒體"))
-        
-        c_b = ws.cell(row=row_idx, column=2, value=item.get("title", "無標題"))
-        raw_url = item.get("url", "")
-        if raw_url:
-            c_b.hyperlink = raw_url
-            c_b.font = link_font
-        else:
-            c_b.font = body_font
-
-        c_c = ws.cell(row=row_idx, column=3, value=item.get("reporter", "編輯部"))
-
-        c_a.alignment = Alignment(horizontal="center", vertical="center")
-        c_b.alignment = Alignment(horizontal="left", vertical="center")
-        c_c.alignment = Alignment(horizontal="center", vertical="center")
-
-        for col_idx in range(1, 4):
-            cell = ws.cell(row=row_idx, column=col_idx)
-            cell.border = thin_border
-            if col_idx != 2:
-                cell.font = body_font
-
-    ws.column_dimensions['A'].width = 20
-    ws.column_dimensions['B'].width = 60
-    ws.column_dimensions['C'].width = 18
-
-    excel_buffer = io.BytesIO()
-    wb.save(excel_buffer)
-    excel_buffer.seek(0)
-    return excel_buffer
-
-# ---------------------------------------------------------------------------
-# 5. 主畫面互動與結果顯示
-# ---------------------------------------------------------------------------
-if search_submitted:
-    if not GEMINI_API_KEY:
-        st.stop()
-        
-    articles = run_news_pipeline(
-        target_org, 
-        event_keyword, 
-        target_year, 
-        st.session_state.get("active_db_df")
-    )
-    
-    if articles:
-        st.session_state['search_results'] = articles
-        st.success(f"🎉 搜尋完成！共檢索到 {len(articles)} 則符合條件的 {target_year} 年報導。")
+if st.button("🚀 開始自動化檢索", type="primary", use_container_width=True):
+    if not target_org or not search_keyword or not target_year:
+        st.error("請完整填寫搜尋條件！")
     else:
-        st.session_state['search_results'] = []
-        st.warning(f"⚪ 未找到符合條件的 {target_year} 年新聞報導。")
+        results = run_news_pipeline(target_org, search_keyword, target_year, db_df, api_key)
+        
+        if not results:
+            st.warning(f"未找到符合條件的 {target_year} 年新聞報導。")
+        else:
+            st.success(f"🎉 成功找到 {len(results)} 筆符合條件的 {target_year} 年新聞報導！")
+            
+            # 轉換為 DataFrame 顯示與供下載
+            df_display = pd.DataFrame(results)
+            
+            # 重新排列與重命名欄位
+            df_export = df_display[["media_name", "title", "reporter", "url"]].copy()
+            df_export.columns = ["媒體名稱", "新聞標題", "記者", "新聞連結"]
+            
+            # 呈現表格預覽
+            st.dataframe(
+                df_export,
+                column_config={
+                    "新聞連結": st.column_config.LinkColumn("新聞連結")
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # ---------------------------------------------------------------------------
+            # 5. 匯出 Excel 報表 (包含超連結)
+            # ---------------------------------------------------------------------------
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                # 寫入資料
+                df_export.to_excel(writer, index=False, sheet_name='輿情報導')
+                
+                # 自動調整欄寬與為 URL 加入點擊效果
+                worksheet = writer.sheets['輿情報導']
+                for row_idx, url in enumerate(df_export['新聞連結'], start=2):
+                    cell = worksheet.cell(row=row_idx, column=4)
+                    cell.hyperlink = url
+                    cell.style = "Hyperlink"
+                
+                # 調整欄寬
+                worksheet.column_dimensions['A'].width = 20
+                worksheet.column_dimensions['B'].width = 50
+                worksheet.column_dimensions['C'].width = 15
+                worksheet.column_dimensions['D'].width = 40
 
-if 'search_results' in st.session_state and st.session_state['search_results']:
-    results_list = st.session_state['search_results']
-    
-    df_display = pd.DataFrame(results_list)
-    df_display = df_display.rename(columns={
-        "media_name": "媒體名稱 (A欄)",
-        "title": "報導標題 (B欄)",
-        "reporter": "記者姓名 (C欄)",
-        "url": "報導連結"
-    })
-    
-    st.subheader("📊 搜尋結果預覽")
-    st.dataframe(df_display[["媒體名稱 (A欄)", "報導標題 (B欄)", "記者姓名 (C欄)", "報導連結"]], use_container_width=True)
-
-    excel_file = generate_custom_excel(results_list)
-    
-    st.download_button(
-        label="📥 匯出 Excel 報表",
-        data=excel_file,
-        file_name=f"{target_org}_{event_keyword}_{target_year}_輿情報表.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary"
-    )
+            st.download_button(
+                label="📥 下載 Excel 輿情報表",
+                data=output.getvalue(),
+                file_name=f"{target_org}_{search_keyword}_{target_year}_輿情報表.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
