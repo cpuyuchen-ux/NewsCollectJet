@@ -17,7 +17,7 @@ from google.genai import types
 # ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="彰化家扶輿情自動檢索與報表生成系統", 
-    page_icon="📰", 
+    page_icon="📰",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -121,26 +121,31 @@ if sidebar_option == "系統簡介":
     st.info("""
     **彰化家扶中心輿情自動檢索與報表生成系統** 旨在幫助同工快速彙整網路媒體報導。
     * **即時檢索**：自動抓取 Google News 最新相關新聞。
-    * **AI + 本地備用演算法**：優先使用 Gemini 1.5 Flash 進行精準解析；若 API 限流則自動啟動「本地防爆演算法」，保障 100% 順利產出。
+    * **AI 結合「本地備用演算法」**：優先使用 Gemini 進行精準解析；若 API 限流則自動啟動「本地防爆演算法」，保障 100% 順利產出搜索結果。
+    * **模組化減速**：批次發送檢索請求，避免觸發 Google 反爬蟲機制 (Anti-Scraping)。
+    * **一鍵報表**：自動產出包含超連結的標準化 Excel 檔案，提升行政與輿情整理效率。
     """)
 
 elif sidebar_option == "系統須知":
     st.subheader("📌 系統須知與使用規範")
     st.warning("""
-    1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用。
-    2. **API 額度雙保險機制**：系統採用 Gemini 1.5 Flash 模型，若仍遇到 429 配額額滿，會自動無縫轉入「本地純文字演算法」，確保資料不遺漏！
-    3. **非網路新聞補充**：紙本報紙、廣播、電視露出請務必人工補充。
+    1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用，嚴禁用於商業爬蟲、網路攻擊或任何非法用途。
+    2. **API 額度雙保險機制**：Gemini 免費層級（Free Tier）通常有嚴格的 RPM（每分鐘請求數）與 TPM（每分鐘 Token 數）限制。請避免短時間內頻繁發送大規模檢索請求，以免觸發 API 限流或配額耗盡。若仍遇到 429 配額額滿，會自動無縫轉入「本地純文字演算法」，確保資料不遺漏！
+    3. **資料準確性**：AI 自動解析結果僅供參考，匯出報表後建議人工進行二次核對。
+    4. **中心PDF檔留存**：報表生成後，請將每一篇報導儲存成PDF檔，放置於中心查報資料夾。
+    5. **人工調整格式**：報表生成後，請配合將資料貼進總會「2026年單位季報_媒體統計格式」之 excel 檔。
+    6. **非網路新聞補充**：本系統僅能抓取網路電子新聞，紙本報紙、廣播、電視露出請務必人工補充。
     """)
 
 elif sidebar_option == "系統管理員":
     st.subheader("🔐 系統管理員後台")
     admin_key = st.text_input("🔑 請輸入管理員金鑰：", type="password")
     if admin_key == "Automation_initiator114077":
-        st.success("🔓 驗證成功！")
+        st.success("🔓 驗證成功，歡迎進入管理員後台！")
         col_m1, col_m2, col_m3 = st.columns(3)
         col_m1.metric("📅 今日日期", str(st.session_state["last_api_date"]))
         col_m2.metric("📡 今日 API 請求次數", f"{st.session_state['api_count_today']} 次")
-        col_m3.metric("🔍 累積檢索次數", f"{len(st.session_state['search_history'])} 筆")
+        col_m3.metric("📊 累積檢索次數", f"{len(st.session_state['search_history'])} 筆")
         
         if st.session_state["search_history"]:
             history_df = pd.DataFrame(st.session_state["search_history"])
@@ -149,7 +154,7 @@ elif sidebar_option == "系統管理員":
         st.error("❌ 金鑰錯誤！")
 
 # ---------------------------------------------------------------------------
-# 5. 核心邏輯：方案一 (Gemini 1.5 Flash) + 方案三 (Python 本地防爆)
+# 5. 核心邏輯：方案一 (Gemini Flash) + 方案三 (Python 本地防爆與記者偵測)
 # ---------------------------------------------------------------------------
 def render_airplane_progress(percent, text=""):
     return f"""
@@ -174,12 +179,34 @@ def lookup_media_type(media_name, media_map):
             return v
     return "非三大報全國性"
 
-def clean_title_local(title, media_name):
-    """本地純 Python 標題清理演算法 (不用 AI 也能剔除標題後綴)"""
-    cleaned = re.sub(r'\s*-\s*.*$', '', title) # 剔除 - 自由時報
-    cleaned = re.sub(r'｜.*$', '', cleaned)    # 剔除 ｜ 聯合新聞網
+def clean_title_and_extract_reporter_local(title, media_name):
+    """
+    本地純 Python 正則表達式處理：
+    1. 從標題中提取記者姓名（常見格式如：〔記者張三／彰化報導〕、記者李四／綜合報導、文／王五 等）
+    2. 剔除標題後綴與記者標記，保留乾淨的新聞標題
+    """
+    reporter = "編輯部"
+    
+    # 嘗試比對常見記者格式
+    reporter_patterns = [
+        r'[〔\[\(]?(?:記者|專題記者|特派記者)\s*([\u4e00-\u9fa5]{2,4})\s*[\/／\s]',  # 〔記者張三／...〕
+        r'(?:記者|特派記者)\s*([\u4e00-\u9fa5]{2,4})\s*報導',                     # 記者張三報導
+        r'(?:文|圖|攝影|責任編輯)[\/／]\s*([\u4e00-\u9fa5]{2,4})'                # 文／張三
+    ]
+    
+    for pattern in reporter_patterns:
+        match = re.search(pattern, title)
+        if match:
+            reporter = match.group(1).strip()
+            break
+            
+    # 清理標題：剔除後綴媒體名與括號內的記者資訊
+    cleaned = re.sub(r'[\(\[\〔].*?(?:記者|報導|文|圖).*?[\)\]\〕]', '', title)
+    cleaned = re.sub(r'\s*-\s*.*$', '', cleaned)     # 剔除 - 自由時報
+    cleaned = re.sub(r'｜.*$', '', cleaned)          # 剔除 ｜ 聯合新聞網
     cleaned = re.sub(r'\|.*$', '', cleaned)
-    return cleaned.strip()
+    
+    return cleaned.strip(), reporter
 
 def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_API_KEY):
     st.session_state["search_history"].append({
@@ -230,7 +257,10 @@ def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_
         prompt = f"""
         新聞列表：{json.dumps(batch_payload, ensure_ascii=False)}
         條件：發布年份須為 {year}，標題或內容需包含 {org} 或 {keyword}。
-        請去除標題末端媒體名稱後綴（如「 - 自由時報」），並提取記者姓名 (若無填 '編輯部')。
+        請執行以下兩件事：
+        1. 去除標題末端媒體名稱後綴（如「 - 自由時報」、「｜ 聯合新聞網」）與記者前綴標記。
+        2. 從標題或文字中精準偵測提取記者姓名（如「記者張三」、「文／李四」則提取「張三」、「李四」）。若標題中無明確記者姓名，請填寫 '編輯部'。
+
         傳回 JSON 格式：
         {{"articles": [{{"id": 0, "media_name": "媒體名稱", "title": "純標題", "reporter": "記者姓名"}}]}}
         """
@@ -266,15 +296,16 @@ def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_
             except Exception as e:
                 time.sleep(2)
         
+        # 若 API 呼叫失敗或限流，啟用本地演算法備援
         if not success:
-            st.toast(f"⚡ 第 {idx} 批次 API 限流，已自動啟動「本地演算法」解析！", icon="⚡")
+            st.toast(f"⚡ 第 {idx} 批次 API 限流，已自動啟動「本地演算法」進行記者偵測與解析！", icon="⚡")
             for item in batch:
-                c_title = clean_title_local(item["title"], item["media_name"])
+                c_title, c_reporter = clean_title_and_extract_reporter_local(item["title"], item["media_name"])
                 results.append({
                     "media_name": item["media_name"],
                     "media_type": lookup_media_type(item["media_name"], media_map),
                     "title": c_title,
-                    "reporter": "編輯部",
+                    "reporter": c_reporter,
                     "url": item["url"]
                 })
             
@@ -300,11 +331,11 @@ if sidebar_option == "主控台 / 檢索系統":
         # 第一排：服務處與同工姓名
         row1_col1, row1_col2 = st.columns(2)
         with row1_col1:
-            selected_office = st.selectbox("🏢 篩選服務處", ["彰化分事務所", "和美兒童館", "員林服務處", "田中服務處", "彰化服務處", "二林服務處", "中心行政組"])
+            selected_office = st.selectbox("🏢 篩選服務處", ["全部", "和美兒童館", "員林服務處", "田中服務處", "彰化服務處", "二林服務處", "中心行政組"])
         with row1_col2:
             staff_name = st.text_input("👤 同工姓名", placeholder="e.g. 家扶小幫手")
 
-        # 第二排：改為浮水印（placeholder）提示
+        # 第二排：關鍵字設定
         row2_col1, row2_col2, row2_col3 = st.columns(3)
         with row2_col1:
             target_org = st.text_input("🏢 機構 / 品牌名稱", placeholder="e.g. 彰化家扶")
@@ -322,7 +353,7 @@ if sidebar_option == "主控台 / 檢索系統":
             results = run_news_pipeline(selected_office, staff_name, target_org, search_keyword, target_year, media_type_map, api_key)
             
             if not results:
-                st.warning(f"🔍 未找到符合條件的新聞報導。")
+                st.warning("🔍 未找到符合條件的新聞報導。")
             else:
                 st.balloons()
                 st.success(f"🎉 成功匯出 {len(results)} 筆新聞報導！")
