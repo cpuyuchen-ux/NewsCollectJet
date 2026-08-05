@@ -181,20 +181,17 @@ def lookup_media_type(media_name, media_map):
 
 def clean_title_and_extract_reporter_local(title, media_name):
     """
-    第二防線（本地 Python 正則表達式 Regex 演算法）：
-    1. 從標題/內文中自動比對 記者/撰文/編輯 [姓名] (報導)? 語法，提取 2~4 字中文姓名。
-    2. 若無法比對成功，統一帶入 '編輯部'。
-    3. 清理標題，剔除記者前綴標記與後綴媒體名稱。
+    本地純 Python 正則表達式處理：
+    1. 從標題中提取記者姓名（常見格式如：〔記者張三／彰化報導〕、記者李四／綜合報導、文／王五 等）
+    2. 剔除標題後綴與記者標記，保留乾淨的新聞標題
     """
     reporter = "編輯部"
     
-    # 強化的正則表達式，涵蓋臺灣新聞常見的記者標記格式
+    # 嘗試比對常見記者格式
     reporter_patterns = [
-        r'[〔\[\(]?(?:記者|專題記者|特派記者)\s*([\u4e00-\u9fa5]{2,4})\s*[\/／\s]',  # 〔記者張三／彰化報導〕
-        r'(?:記者|特派記者)\s*([\u4e00-\u9fa5]{2,4})\s*報導',                     # 記者李四報導
-        r'([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*(?:彰化|綜合|地方|台北|台中|報導)',   # 王五／彰化報導
-        r'(?:文|撰文|責任編輯|編輯|攝影)[\/／]\s*([\u4e00-\u9fa5]{2,4})',           # 文／趙六 或 撰文/趙六
-        r'[〔\[\(]\s*([\u4e00-\u9fa5]{2,4})\s*(?:採訪報導|報導)\s*[〕\]\)]'        # 〔孫七採訪報導〕
+        r'[〔\[\(]?(?:記者|專題記者|特派記者)\s*([\u4e00-\u9fa5]{2,4})\s*[\/／\s]',  # 〔記者張三／...〕
+        r'(?:記者|特派記者)\s*([\u4e00-\u9fa5]{2,4})\s*報導',                     # 記者張三報導
+        r'(?:文|圖|攝影|責任編輯)[\/／]\s*([\u4e00-\u9fa5]{2,4})'                # 文／張三
     ]
     
     for pattern in reporter_patterns:
@@ -202,9 +199,9 @@ def clean_title_and_extract_reporter_local(title, media_name):
         if match:
             reporter = match.group(1).strip()
             break
-
-    # 剔除標題中常見的記者括號資訊與後綴媒體名稱，保留乾淨標題
-    cleaned = re.sub(r'[\(\[\〔].*?(?:記者|報導|文|圖|攝影|編輯).*?[\)\]\〕]', '', title)
+            
+    # 清理標題：剔除後綴媒體名與括號內的記者資訊
+    cleaned = re.sub(r'[\(\[\〔].*?(?:記者|報導|文|圖).*?[\)\]\〕]', '', title)
     cleaned = re.sub(r'\s*-\s*.*$', '', cleaned)     # 剔除 - 自由時報
     cleaned = re.sub(r'｜.*$', '', cleaned)          # 剔除 ｜ 聯合新聞網
     cleaned = re.sub(r'\|.*$', '', cleaned)
@@ -257,16 +254,15 @@ def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_
             for i, item in enumerate(batch)
         ]
 
-        # 第一防線（Gemini 1.5 Flash）：強化 Prompt 指示
         prompt = f"""
         新聞列表：{json.dumps(batch_payload, ensure_ascii=False)}
         條件：發布年份須為 {year}，標題或內容需包含 {org} 或 {keyword}。
         請執行以下兩件事：
-        1. 去除新聞標題末端的媒體名稱後綴（如「 - 自由時報」、「｜ 聯合新聞網」）與括號內的記者前綴標記。
-        2. 優先精準辨識與提取記者姓名（常見格式如：「記者張三」、「記者李四報導」、「王五／彰化報導」、「文／趙六」、「〔記者孫七／彰化報導〕」等），請只提取 2~4 字的中文姓名。若標題中無明確記者姓名，請統一填寫 '編輯部'。
+        1. 去除標題末端媒體名稱後綴（如「 - 自由時報」、「｜ 聯合新聞網」）與記者前綴標記。
+        2. 從標題或文字中精準偵測提取記者姓名（如「記者張三」、「文／李四」則提取「張三」、「李四」）。若標題中無明確記者姓名，請填寫 '編輯部'。
 
         傳回 JSON 格式：
-        {{"articles": [{{"id": 0, "media_name": "媒體名稱", "title": "純新聞標題", "reporter": "記者姓名"}}]}}
+        {{"articles": [{{"id": 0, "media_name": "媒體名稱", "title": "純標題", "reporter": "記者姓名"}}]}}
         """
         
         max_retries = 2
@@ -300,9 +296,9 @@ def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_
             except Exception as e:
                 time.sleep(2)
         
-        # 若 API 呼叫失敗或限流，啟用第二防線（本地 Regex 演算法）
+        # 若 API 呼叫失敗或限流，啟用本地演算法備援
         if not success:
-            st.toast(f"⚡ 第 {idx} 批次 API 限流，已自動啟動「本地 Regex 演算法」進行記者偵測與解析！", icon="⚡")
+            st.toast(f"⚡ 第 {idx} 批次 API 限流，已自動啟動「本地演算法」進行記者偵測與解析！", icon="⚡")
             for item in batch:
                 c_title, c_reporter = clean_title_and_extract_reporter_local(item["title"], item["media_name"])
                 results.append({
@@ -366,10 +362,8 @@ if sidebar_option == "主控台 / 檢索系統":
                 df_display["服務處"] = selected_office
                 df_display["檢索同工"] = staff_name
                 
-                # 順序 3. 調整欄位順序：
-                # A欄: 媒體名稱 | B欄: 新聞標題 | C欄: 新聞連結 | D欄: 記者姓名 | E欄: 媒體類型 | F欄: 服務處 | G欄: 檢索同工
-                df_export = df_display[["media_name", "title", "url", "reporter", "media_type", "服務處", "檢索同工"]].copy()
-                df_export.columns = ["媒體名稱", "新聞標題", "新聞連結", "記者姓名", "媒體類型", "服務處", "檢索同工"]
+                df_export = df_display[["服務處", "檢索同工", "media_name", "media_type", "title", "reporter", "url"]].copy()
+                df_export.columns = ["服務處", "檢索同工", "媒體名稱", "媒體類型", "新聞標題", "記者", "新聞連結"]
                 
                 st.dataframe(df_export, column_config={"新聞連結": st.column_config.LinkColumn("新聞連結")}, use_container_width=True, hide_index=True)
                 
@@ -377,9 +371,8 @@ if sidebar_option == "主控台 / 檢索系統":
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     df_export.to_excel(writer, index=False, sheet_name='輿情報導')
                     worksheet = writer.sheets['輿情報導']
-                    # C欄 (第 3 欄) 為新聞連結，為其設定 Excel 可點擊的超連結格式
                     for row_idx, url in enumerate(df_export['新聞連結'], start=2):
-                        cell = worksheet.cell(row=row_idx, column=3)
+                        cell = worksheet.cell(row=row_idx, column=7)
                         cell.hyperlink = url
                         cell.style = "Hyperlink"
 
