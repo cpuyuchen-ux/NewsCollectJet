@@ -116,7 +116,8 @@ st.markdown('<div class="sub-header">自動整合 Google News 即時新聞，並
 # 警示橫幅
 st.markdown("""
 <div class="warning-bar">
-    <p class="warning-text">※此系統為個人自主開發，請勿用做非法行為！</p>
+    <p class="warning-text">※此系統為個人自主開發，請勿用做非法行為！😈
+    <p class="warning-text">※檢索資料庫為「彰化家扶」常見出報媒體，資料庫將不定期更新。👀
 </div>
 """, unsafe_allow_html=True)
 
@@ -447,3 +448,4 @@ if sidebar_option == "主控台 / 檢索系統":
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
+
