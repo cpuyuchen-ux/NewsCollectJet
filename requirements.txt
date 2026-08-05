@@ -1,0 +1,7 @@
+Plaintext
+
+streamlit
+pandas
+openpyxl
+duckduckgo-search
+google-genai
