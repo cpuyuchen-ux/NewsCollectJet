@@ -34,7 +34,7 @@ if not api_key:
 st.sidebar.markdown("---")
 st.sidebar.subheader("🗄️ 內部數據庫 (Database.csv)")
 
-# 管理者密碼解鎖機制 (預設密碼 automation_initiator114077)
+# 管理者密碼解鎖機制
 db_df = None
 db_unlocked = st.sidebar.checkbox("🔓 解鎖管理者設定 (上傳 Database.csv)")
 
@@ -53,7 +53,7 @@ if db_unlocked:
         st.sidebar.error("密碼錯誤")
 
 # ---------------------------------------------------------------------------
-# 3. 核心搜尋與 AI 分批解析 (含 429 防爆與自動重試機制)
+# 3. 核心搜尋與 AI 分批解析 (針對免費版 API 防爆與重試)
 # ---------------------------------------------------------------------------
 def run_news_pipeline(org, keyword, year, db_df, GEMINI_API_KEY):
     db_context = ""
@@ -97,12 +97,12 @@ def run_news_pipeline(org, keyword, year, db_df, GEMINI_API_KEY):
     if not raw_results:
         return []
 
-    # C. AI 分批解析 (加入 429 防爆與自動重試機制)
+    # C. AI 分批解析 (調整參數以適應免費版 Rate Limit，並設定 35 秒自動冷卻)
     results = []
     client = genai.Client(api_key=GEMINI_API_KEY)
     
-    # 放大批次數量 (例如一次處理 50 筆)，減少呼叫 API 次數
-    batch_size = 50
+    # 縮小批次數量（改為 15 筆），避免單次 Prompt 的 Token 過多衝破免費額度
+    batch_size = 15
     batches = [raw_results[i:i + batch_size] for i in range(0, len(raw_results), batch_size)]
     
     progress_bar = st.progress(0, text=f"🤖 Gemini 正在精準篩選 {year} 年份報導並整理結構...")
@@ -147,17 +147,18 @@ def run_news_pipeline(org, keyword, year, db_df, GEMINI_API_KEY):
                 )
                 res_data = json.loads(response.text)
                 results.extend(res_data.get("articles", []))
-                break  # 成功就跳出重試迴圈
+                break  # 成功跳出重試迴圈
             except Exception as e:
                 if "429" in str(e) and attempt < max_retries - 1:
-                    st.toast(f"⏳ 觸發 API 頻率限制，等待 15 秒後重試第 {idx} 批次...", icon="⏳")
-                    time.sleep(15)  # 等待 15 秒讓 Quota 冷卻
+                    # 觸發 429 時，暫停 35 秒等待 Google 冷卻
+                    st.toast(f"⏳ 觸發免費 API 頻率限制，自動等待 35 秒讓額度冷卻 (第 {idx}/{len(batches)} 批次)...", icon="⏳")
+                    time.sleep(35)
                 else:
                     st.warning(f"第 {idx} 批次 AI 解析失敗：{e}")
                     break
             
         progress_bar.progress(idx / len(batches))
-        time.sleep(4.0)  # 每批次間隔加大至 4 秒，防止瞬間請求過高
+        time.sleep(6.0)  # 每批次間隔加大至 6 秒
         
     progress_bar.empty()
     return results
