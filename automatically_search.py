@@ -121,31 +121,26 @@ if sidebar_option == "系統簡介":
     st.info("""
     **彰化家扶中心輿情自動檢索與報表生成系統** 旨在幫助同工快速彙整網路媒體報導。
     * **即時檢索**：自動抓取 Google News 最新相關新聞。
-    * **AI 結合「本地備用演算法」**：優先使用 Gemini 1.5 Flash 進行精準解析；若 API 限流則自動啟動「本地防爆演算法」，保障 100% 順利產出搜索結果。
-    * **模組化減速**：批次發送檢索請求，避免觸發 Google 反爬蟲機制 (Anti-Scraping)。
-    * **一鍵報表**：自動產出包含超連結的標準化 Excel 檔案，提升行政與輿情整理效率。
+    * **AI + 本地備用演算法**：優先使用 Gemini 1.5 Flash 進行精準解析；若 API 限流則自動啟動「本地防爆演算法」，保障 100% 順利產出。
     """)
 
 elif sidebar_option == "系統須知":
     st.subheader("📌 系統須知與使用規範")
     st.warning("""
-    1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用，嚴禁用於商業爬蟲、網路攻擊或任何非法用途。
-    2. **API 額度雙保險機制**：Gemini 2.0 Flash 免費層級（Free Tier）通常有嚴格的 RPM（每分鐘請求數）與 TPM（每分鐘 Token 數）限制。請避免短時間內頻繁發送大規模檢索請求，以免觸發 API 限流或配額耗盡。若仍遇到 429 配額額滿，會自動無縫轉入「本地純文字演算法」，確保資料不遺漏！
-    3. **資料準確性**：AI 自動解析結果僅供參考，匯出報表後建議人工進行二次核對。
-    4. **中心PDF檔留存**：報表生成後，請將每一篇報導儲存成PDF檔，放置於中心查報資料夾。
-    5. **人工調整格式**：報表生成後，請配合將資料貼進總會「2026年單位季報_媒體統計格式」之 excel 檔。
-    6. **非網路新聞補充**：本系統僅能抓取網路電子新聞，紙本報紙、廣播、電視露出請務必人工補充。
+    1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用。
+    2. **API 額度雙保險機制**：系統採用 Gemini 1.5 Flash 模型，若仍遇到 429 配額額滿，會自動無縫轉入「本地純文字演算法」，確保資料不遺漏！
+    3. **非網路新聞補充**：紙本報紙、廣播、電視露出請務必人工補充。
     """)
 
 elif sidebar_option == "系統管理員":
     st.subheader("🔐 系統管理員後台")
     admin_key = st.text_input("🔑 請輸入管理員金鑰：", type="password")
     if admin_key == "Automation_initiator114077":
-        st.success("🔓 驗證成功，歡迎進入管理員後台！")
+        st.success("🔓 驗證成功！")
         col_m1, col_m2, col_m3 = st.columns(3)
         col_m1.metric("📅 今日日期", str(st.session_state["last_api_date"]))
         col_m2.metric("📡 今日 API 請求次數", f"{st.session_state['api_count_today']} 次")
-        col_m3.metric("📊 累積檢索次數", f"{len(st.session_state['search_history'])} 筆")
+        col_m3.metric("🔍 累積檢索次數", f"{len(st.session_state['search_history'])} 筆")
         
         if st.session_state["search_history"]:
             history_df = pd.DataFrame(st.session_state["search_history"])
@@ -154,7 +149,7 @@ elif sidebar_option == "系統管理員":
         st.error("❌ 金鑰錯誤！")
 
 # ---------------------------------------------------------------------------
-# 5. 核心邏輯：方案一 (Gemini 1.5 Flash) + 方案三 (Python 本地防爆)
+# 5. 核心邏輯與演算法
 # ---------------------------------------------------------------------------
 def render_airplane_progress(percent, text=""):
     return f"""
@@ -179,12 +174,29 @@ def lookup_media_type(media_name, media_map):
             return v
     return "非三大報全國性"
 
-def clean_title_local(title, media_name):
-    """本地純 Python 標題清理演算法 (不用 AI 也能剔除標題後綴)"""
-    cleaned = re.sub(r'\s*-\s*.*$', '', title) # 剔除 - 自由時報
-    cleaned = re.sub(r'｜.*$', '', cleaned)    # 剔除 ｜ 聯合新聞網
+def clean_title_local(title):
+    """剔除新聞標題後綴"""
+    cleaned = re.sub(r'\s*-\s*.*$', '', title)
+    cleaned = re.sub(r'｜.*$', '', cleaned)
     cleaned = re.sub(r'\|.*$', '', cleaned)
     return cleaned.strip()
+
+def extract_reporter_local(text):
+    """方案三本地備用：運用正則表達式自動偵測記者姓名 (例如：記者張三報導、記者李四、王五報導)"""
+    patterns = [
+        r'記者(?:／|/|\s)?([\u4e00-\u9fa5]{2,4})(?:報導|／|/|\s|$)',
+        r'([\u4e00-\u9fa5]{2,4})\s*記者\s*報導',
+        r'([\u4e00-\u9fa5]{2,4})\s*報導',
+        r'撰文(?:／|/|\s)?([\u4e00-\u9fa5]{2,4})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            reporter = match.group(1).strip()
+            # 排除非人名的常見詞彙
+            if reporter not in ["綜合", "彰化", "中心", "新聞", "即時", "獨家"]:
+                return reporter
+    return "編輯部"
 
 def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_API_KEY):
     st.session_state["search_history"].append({
@@ -235,7 +247,10 @@ def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_
         prompt = f"""
         新聞列表：{json.dumps(batch_payload, ensure_ascii=False)}
         條件：發布年份須為 {year}，標題或內容需包含 {org} 或 {keyword}。
-        請去除標題末端媒體名稱後綴（如「 - 自由時報」），並提取記者姓名 (若無填 '編輯部')。
+        請幫我完成兩件事：
+        1. 去除標題末端媒體名稱後綴（如「 - 自由時報」）。
+        2. 偵測標題中的記者資訊（如「記者張三」、「李四報導」、「記者王五／彰化報導」），將「張三」、「李四」等人名擷取為記者姓名。若沒有提到姓名則填 '編輯部'。
+        
         傳回 JSON 格式：
         {{"articles": [{{"id": 0, "media_name": "媒體名稱", "title": "純標題", "reporter": "記者姓名"}}]}}
         """
@@ -261,26 +276,28 @@ def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_
                         m_name = art.get("media_name") or batch[art_id]["media_name"]
                         results.append({
                             "media_name": m_name,
-                            "media_type": lookup_media_type(m_name, media_map),
                             "title": art.get("title", batch[art_id]["title"]),
+                            "url": batch[art_id]["url"],
                             "reporter": art.get("reporter", "編輯部"),
-                            "url": batch[art_id]["url"]
+                            "media_type": lookup_media_type(m_name, media_map)
                         })
                 success = True
                 break
             except Exception as e:
                 time.sleep(2)
         
+        # 方案三（保底）：若 AI API 遇到限流，無縫轉入 Python 本地 Regex 偵測
         if not success:
-            st.toast(f"⚡ 第 {idx} 批次 API 限流，已自動啟動「本地演算法」解析！", icon="⚡")
+            st.toast(f"⚡ 第 {idx} 批次 API 限流，已自動啟動「本地 Regex 演算法」！", icon="⚡")
             for item in batch:
-                c_title = clean_title_local(item["title"], item["media_name"])
+                c_title = clean_title_local(item["title"])
+                reporter = extract_reporter_local(item["title"])
                 results.append({
                     "media_name": item["media_name"],
-                    "media_type": lookup_media_type(item["media_name"], media_map),
                     "title": c_title,
-                    "reporter": "編輯部",
-                    "url": item["url"]
+                    "url": item["url"],
+                    "reporter": reporter,
+                    "media_type": lookup_media_type(item["media_name"], media_map)
                 })
             
         current_pct = int((idx / len(batches)) * 100)
@@ -302,14 +319,12 @@ if sidebar_option == "主控台 / 檢索系統":
         st.markdown('<div class="search-card">', unsafe_allow_html=True)
         st.subheader("🔍 設定檢索條件")
         
-        # 第一排：服務處與同工姓名
         row1_col1, row1_col2 = st.columns(2)
         with row1_col1:
-            selected_office = st.selectbox("🏢 篩選服務處", ["全部", "和美兒童館", "員林服務處", "田中服務處", "彰化服務處", "二林服務處", "中心行政組"])
+            selected_office = st.selectbox("🏢 篩選服務處", ["彰化分事務所", "和美兒童館", "員林服務處", "田中服務處", "彰化服務處", "二林服務處", "中心行政組"])
         with row1_col2:
             staff_name = st.text_input("👤 同工姓名", placeholder="e.g. 家扶小幫手")
 
-        # 第二排：改為浮水印（placeholder）提示
         row2_col1, row2_col2, row2_col3 = st.columns(3)
         with row2_col1:
             target_org = st.text_input("🏢 機構 / 品牌名稱", placeholder="e.g. 彰化家扶")
@@ -336,17 +351,19 @@ if sidebar_option == "主控台 / 檢索系統":
                 df_display["服務處"] = selected_office
                 df_display["檢索同工"] = staff_name
                 
-                df_export = df_display[["服務處", "檢索同工", "media_name", "media_type", "title", "reporter", "url"]].copy()
-                df_export.columns = ["服務處", "檢索同工", "媒體名稱", "媒體類型", "新聞標題", "記者", "新聞連結"]
+                # 指定欄位順序：A欄:媒體名稱 | B欄:新聞標題 | C欄:新聞連結 | D欄:記者姓名 | E欄:媒體類型...
+                df_export = df_display[["media_name", "title", "url", "reporter", "media_type", "服務處", "檢索同工"]].copy()
+                df_export.columns = ["媒體名稱", "新聞標題", "新聞連結", "記者姓名", "媒體類型", "服務處", "檢索同工"]
                 
                 st.dataframe(df_export, column_config={"新聞連結": st.column_config.LinkColumn("新聞連結")}, use_container_width=True, hide_index=True)
                 
+                # 下載 Excel 設定超連結於 C 欄（column=3）
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     df_export.to_excel(writer, index=False, sheet_name='輿情報導')
                     worksheet = writer.sheets['輿情報導']
                     for row_idx, url in enumerate(df_export['新聞連結'], start=2):
-                        cell = worksheet.cell(row=row_idx, column=7)
+                        cell = worksheet.cell(row=row_idx, column=3) # C欄
                         cell.hyperlink = url
                         cell.style = "Hyperlink"
 
