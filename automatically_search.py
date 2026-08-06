@@ -16,8 +16,8 @@ from google.genai import types
 # 1. 頁面配置與自訂 CSS 樣式
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="彰化家扶輿情自動檢索與報表生成系統", 
-    page_icon="📰", 
+    page_title="彰化家扶輿情自動檢索與報表生成系統",
+    page_icon="📰",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -121,14 +121,14 @@ if sidebar_option == "系統簡介":
     st.info("""
     **彰化家扶中心輿情自動檢索與報表生成系統** 旨在幫助同工快速彙整網路媒體報導。
     * **即時檢索**：自動抓取 Google News 最新相關新聞。
-    * **AI + 本地備用演算法**：優先使用 Gemini 1.5 Flash 進行精準解析；若 API 限流則自動啟動「本地防爆演算法」，保障 100% 順利產出。
+    * **AI +本地備用演算法**：優先使用 Gemini 2.5 Flash 進行精準解析；若 API 限流則自動啟動「本地防爆演算法」，保障 100% 順利產出。
     """)
 
 elif sidebar_option == "系統須知":
     st.subheader("📌 系統須知與使用規範")
     st.warning("""
     1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用。
-    2. **API 額度雙保險機制**：系統採用 Gemini 1.5 Flash 模型，若仍遇到 429 配額額滿，會自動無縫轉入「本地純文字演算法」，確保資料不遺漏！
+    2. **API額度雙保險機制**：系統採用 Gemini 2.5 Flash 模型，若仍遇到 429 配額額滿，會自動無縫轉入「本地純文字演算法」，確保資料不遺漏！
     3. **非網路新聞補充**：紙本報紙、廣播、電視露出請務必人工補充。
     """)
 
@@ -149,7 +149,7 @@ elif sidebar_option == "系統管理員":
         st.error("❌ 金鑰錯誤！")
 
 # ---------------------------------------------------------------------------
-# 5. 核心邏輯：方案一 (Gemini 1.5 Flash) + 方案三 (Python 本地防爆)
+# 5. 核心邏輯：Gemini AI + Python 本地防爆
 # ---------------------------------------------------------------------------
 def render_airplane_progress(percent, text=""):
     return f"""
@@ -176,8 +176,8 @@ def lookup_media_type(media_name, media_map):
 
 def clean_title_local(title, media_name):
     """本地純 Python 標題清理演算法 (不用 AI 也能剔除標題後綴)"""
-    cleaned = re.sub(r'\s*-\s*.*$', '', title) # 剔除 - 自由時報
-    cleaned = re.sub(r'｜.*$', '', cleaned)    # 剔除 ｜ 聯合新聞網
+    cleaned = re.sub(r'\s*-\s*.*$', '', title)   # 剔除 - 自由時報
+    cleaned = re.sub(r'｜.*$', '', cleaned)        # 剔除 ｜ 聯合新聞網
     cleaned = re.sub(r'\|.*$', '', cleaned)
     return cleaned.strip()
 
@@ -223,7 +223,7 @@ def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_
     
     for idx, batch in enumerate(batches, start=1):
         batch_payload = [
-            {"id": i, "title": item["title"], "date": item["date"], "media_name": item["media_name"]} 
+            {"id": i, "title": item["title"], "date": item["date"], "media_name": item["media_name"]}
             for i, item in enumerate(batch)
         ]
 
@@ -243,7 +243,110 @@ def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_
                 st.session_state["api_count_today"] += 1
                 
                 response = client.models.generate_content(
-                    model="gemini-1.5-flash",
+                    model="gemini-2.5-flash",
                     contents=prompt,
                     config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                res_data = json.loads(response.text)
+                parsed = res_data.get("articles", [])
+                
+                for art in parsed:
+                    art_id = art.get("id", -1)
+                    if 0 <= art_id < len(batch):
+                        m_name = art.get("media_name") or batch[art_id]["media_name"]
+                        results.append({
+                            "media_name": m_name,
+                            "media_type": lookup_media_type(m_name, media_map),
+                            "title": art.get("title", batch[art_id]["title"]),
+                            "reporter": art.get("reporter", "編輯部"),
+                            "url": batch[art_id]["url"]
+                        })
+                success = True
+                break
+            except Exception as e:
+                time.sleep(2)
+        
+        if not success:
+            st.toast(f"⚡ 第 {idx} 批次 API 限流，已自動啟動「本地演算法」解析！", icon="⚡")
+            for item in batch:
+                c_title = clean_title_local(item["title"], item["media_name"])
+                results.append({
+                    "media_name": item["media_name"],
+                    "media_type": lookup_media_type(item["media_name"], media_map),
+                    "title": c_title,
+                    "reporter": "編輯部",
+                    "url": item["url"]
+                })
+            
+        current_pct = int((idx / len(batches)) * 100)
+        progress_placeholder.markdown(render_airplane_progress(current_pct, f"🛫 正在處理第 {idx}/{len(batches)} 批次..."), unsafe_allow_html=True)
+        time.sleep(1)
+        
+    progress_placeholder.empty()
+    return results
+
+# ---------------------------------------------------------------------------
+# 6. 主控台介面
+# ---------------------------------------------------------------------------
+if sidebar_option == "主控台 / 檢索系統":
+    if not api_key:
+        st.warning("⚠️ 請先設定 API Key 以啟用檢索系統。")
+        st.stop()
+
+    with st.container():
+        st.markdown('<div class="search-card">', unsafe_allow_html=True)
+        st.subheader("🔍 設定檢索條件")
+        
+        row1_col1, row1_col2 = st.columns(2)
+        with row1_col1:
+            selected_office = st.selectbox("🏢 篩選服務處", ["全部", "和美兒童館", "員林服務處", "田中服務處", "彰化服務處", "二林服務處", "中心行政組"])
+        with row1_col2:
+            staff_name = st.text_input("👤 同工姓名", placeholder="e.g. 家扶小幫手")
+
+        row2_col1, row2_col2, row2_col3 = st.columns(3)
+        with row2_col1:
+            target_org = st.text_input("🏢 機構 / 品牌名稱", placeholder="e.g. 彰化家扶")
+        with row2_col2:
+            search_keyword = st.text_input("🔑 搜尋關鍵字", placeholder="e.g. 課輔班、相見歡")
+        with row2_col3:
+            target_year = st.text_input("📅 目標年份 (YYYY)", placeholder="e.g. 2026")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if st.button("🚀 開始自動化檢索與解析", type="primary", use_container_width=True):
+        if not staff_name or not target_org or not search_keyword or not target_year:
+            st.error("⚠️ 請完整填寫所有欄位條件！")
+        else:
+            results = run_news_pipeline(selected_office, staff_name, target_org, search_keyword, target_year, media_type_map, api_key)
+            
+            if not results:
+                st.warning("🔍 未找到符合條件的新聞報導。")
+            else:
+                st.balloons()
+                st.success(f"🎉 成功匯出 {len(results)} 筆新聞報導！")
+                
+                df_display = pd.DataFrame(results)
+                df_display["服務處"] = selected_office
+                df_display["檢索同工"] = staff_name
+                
+                df_export = df_display[["服務處", "檢索同工", "media_name", "media_type", "title", "reporter", "url"]].copy()
+                df_export.columns = ["服務處", "檢索同工", "媒體名稱", "媒體類型", "新聞標題", "記者", "新聞連結"]
+                
+                st.dataframe(df_export, column_config={"新聞連結": st.column_config.LinkColumn("新聞連結")}, use_container_width=True, hide_index=True)
+                
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df_export.to_excel(writer, index=False, sheet_name='輿情報導')
+                    worksheet = writer.sheets['輿情報導']
+                    for row_idx, url in enumerate(df_export['新聞連結'], start=2):
+                        cell = worksheet.cell(row=row_idx, column=7)
+                        cell.hyperlink = url
+                        cell.style = "Hyperlink"
+
+                st.download_button(
+                    label="📥 下載 Excel 格式輿情報表",
+                    data=output.getvalue(),
+                    file_name=f"[{selected_office}_{staff_name}]{target_org}_{search_keyword}_{target_year}_輿情報表.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
                 )
