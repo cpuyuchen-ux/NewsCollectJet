@@ -111,9 +111,10 @@ st.markdown(
 st.markdown(
     """
 <div class="warning-bar">
-    <p class="warning-text">※已強化全網小報抓取演算法，打破 Google News 限制，自動搜羅地方媒體！</p>
+    <p class="warning-text">※此系統為個人自主開發，請勿用做非法行為😈</p>
+    <p class="warning-text">※已強化全網小報抓取演算法，打破 Google News 限制，自動搜羅地方媒體🌏</p>
     <p class="warning-text">※檢索資料庫為「彰化家扶」常見出報媒體，資料庫將不定期更新👀</p>
-    <p class="warning-text">※此系統供同工免費使用，惟開發者仍保有此系統所有權🔧</p>
+    <p class="warning-text">※此系統供同工免費使用，惟開發者仍保有此系統所有權，敬請尊重著作權🔧</p>
 </div>
 """,
     unsafe_allow_html=True,
@@ -198,8 +199,17 @@ def extract_reporter_sensor(text):
 def parse_media_from_url_or_title(title, url):
     """本地辨識小報媒體名稱 (當 Google 沒標註媒體時)"""
     domain_map = {
+        "news.owlting.com"："奧丁丁新聞",
         "886.news": "警政時報",
         "taichung.news": "台中時報",
+        "nantoutimes.com"："南投時報",
+        "pingtungtimes.com.tw"："屏東時報",
+        "taipeipost.org"："台北郵報",
+        "marketersgo.com"："行銷人",
+        "gothe.tw"："走遊",
+        "tdn.today"：善思新聞網",
+        "ltvnews.net"：在地人新聞,
+        "firenews.com.tw"："火報",
         "tc.news": "台中新聞網",
         "tn.news": "台灣新聞網",
         "peopo.org": "PeoPo公民新聞",
@@ -404,7 +414,7 @@ if sidebar_option == "🔍 檢索系統":
     with col2:
         staff_name = st.text_input("👤 主責同工姓名：", placeholder="e.g. 彰化家扶小編")
         keyword = st.text_input(
-            "🔑 搜尋新聞關鍵字：", placeholder="e.g. 課輔班、警政時報"
+            "🔑 搜尋新聞關鍵字：", placeholder="e.g. 課輔班、相見歡"
         )
 
     search_button = st.button("🚀 開始全網小報檢索與生成報表", use_container_width=True)
@@ -444,7 +454,7 @@ if sidebar_option == "🔍 檢索系統":
                 st.download_button(
                     label="📥 下載輿情統計 Excel 報表",
                     data=output.getvalue(),
-                    file_name=f"{org}_{keyword}_全網小報輿情報表.xlsx",
+                    file_name=f"{org}_{keyword}_全網輿情報表.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
@@ -453,6 +463,13 @@ elif sidebar_option == "💡 系統簡介":
     st.subheader("💡 全網小報檢索系統特點")
     st.markdown(
         """
+    **彰化家扶中心輿情自動檢索與報表生成系統**旨在幫助同工快速彙整網路媒體報導。
+
+    * **即時檢索**：自動爬取 Google News 最新相關新聞。
+    * **AI 結構化整理：運用 Gemini AI 自動識別新聞標題、發布年份、記者姓名、對照媒體分類（三大報/非三大報等）並進行資料淨化。
+    * **一鍵報表**：自動產出包含服務處、主責查詢同工、媒體分類與超連結的標準化 Excel 檔案，提升行政與輿情整理效率。
+    * **模組化減速**：批次發送檢索要求，避免觸發 Google 反爬蟲機制（Anti-Scraping）。
+    * **本地備用演算法防爆機制**：優先使用 Gemini 進行精準解析；若 API限流則自動啟動「本地防爆演算法」，保障 100% 順利產出。
     * **擺脫 Google News RSS 限制**：採用 Python 本地 BeautifulSoup 技術，直接抓取 Google 一般網頁搜尋，包含小報與地方新聞網（警政時報、台中時報、PeoPo公民新聞等）。
     * **自動域名識別**：自動從網址與標題辨識出小報名稱。
     * **記者姓名 Sensor 強化**：即使小報格式多變，亦能靠正則表達式提取「記者姓名」。
@@ -460,9 +477,53 @@ elif sidebar_option == "💡 系統簡介":
     )
 
 elif sidebar_option == "📌 系統須知":
-    st.subheader("📌 使用須知")
-    st.info("本版本已全面啟用全網小報搜尋模式，抓取效果顯著提升！")
-
+    st.subheader("📌 系統須知與使用規範")
+    st.warning(
+        ""
+    ※本版本已全面啟用全網小報搜尋模式，抓取效果顯著提升📈
+    1.**遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用，嚴禁用於商業爬蟲、網路攻擊或任何非法用途🈲
+    2.**API 額度雙保險機制"：系統採用 Genimi 1.5 Flash 模型，若仍遇到429配額額滿，將自動無縫轉入「本地純文字演算法」，確保資料不遺漏🗂️
+    3.**資料準確性**： AI 自動解析結果僅供參考，匯出報表後建議人工進行二次核對，尤其檢核「奧丁丁新聞」、「PChome新聞」、「蕃新聞」、「奇摩新聞」等，確保報導未被遺漏。
+    4.**中心 PDF 檔存查**：報表生成後，請將每一篇報導儲存為 PDF 檔，放置於中心查報資料夾備查。
+    5.**人工調整格式**：報表生成後，請配合將資料貼入「2026年單位季報_媒體統計格式」之 Excel 檔，並視情況補充記者姓名。
+    6.**非網路新聞補充**：本系統僅能抓取網路電子新聞，紙本報紙、電台節目、電視新聞等露出請務必人工補充，俾使資料趨於完整。
+    """"
+    )
+    
 elif sidebar_option == "🔐 系統管理員":
-    st.subheader("🔐 管理員後台")
-    st.info("系統運行正常。")
+    st.subheader("🔐 系統管理員後台")
+    admin_key = st.text_input("🔑 請輸入管理員金鑰：", type="password")
+
+    if admin_key == "Automation_initiator114077":
+        st.success("🔓 驗證成功，歡迎進入管理員後台！")
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("📅 今日日期", str(st.session_state["last_api_date"]))
+        col_m2.metric(
+            "📡 今日 API 請求次數", f"{st.session_state['api_count_today']} 次"
+        )
+        col_m3.metric(
+            "🔍 累積檢索次數", f"{len(st.session_state['search_history'])} 筆"
+        )
+
+        st.markdown("---")
+        if st.session_state["search_history"]:
+            history_df = pd.DataFrame(st.session_state["search_history"])
+            st.dataframe(history_df, use_container_width=True)
+
+            history_output = io.BytesIO()
+            with pd.ExcelWriter(history_output, engine="openpyxl") as writer:
+                history_df.to_excel(
+                    writer, index=False, sheet_name="系統使用統計"
+                )
+
+            st.download_button(
+                label="📥 匯出管理員統計報表 (Excel)",
+                data=history_output.getvalue(),
+                file_name=f"系統使用紀錄_{datetime.date.today()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        else:
+            st.info("目前尚無搜尋歷史紀錄。")
+    elif admin_key:
+        st.error("❌ 金鑰錯誤！") 
