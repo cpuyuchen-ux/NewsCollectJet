@@ -317,7 +317,7 @@ def run_news_pipeline(
 
     # 1. 啟動 RSS 穩定爬蟲
     with st.spinner(
-        f"🕷️ 正在搜羅全網新聞報導（含地方新聞與全網新聞網）『{org} {keyword}』..."
+        f"📚 正在搜羅全網新聞報導『{org} {keyword}』..."
     ):
         raw_results = fetch_google_news_rss(org, keyword)
 
@@ -334,10 +334,19 @@ def run_news_pipeline(
             st.sidebar.warning(f"⚠️ Gemini 初始化失敗：{e}")
 
     results = []
+    
+    # 建立動態文字與進度條佔位元件
+    progress_text_slot = st.empty()
     progress_bar = st.progress(0)
     total_items = len(raw_results)
 
     for i, item in enumerate(raw_results):
+        percent = int((i + 1) / total_items * 100)
+        
+        # 動態更新進度文字與進度條 (格式：✈️ 正在處理... 65%)
+        progress_text_slot.markdown(f"✈️ **新聞解析進度：{percent}%**")
+        progress_bar.progress(percent)
+
         cleaned_title = clean_title_local(item["title"])
         media_name = item["media_name"]
         m_type = lookup_media_type(media_name, media_map)
@@ -381,8 +390,8 @@ def run_news_pipeline(
             }
         )
 
-        progress_bar.progress(int((i + 1) / total_items * 100))
-
+    # 任務完成後清空進度條區塊
+    progress_text_slot.empty()
     progress_bar.empty()
     return results
 
@@ -414,7 +423,7 @@ if sidebar_option == "🔍 檢索系統":
             "🔑 搜尋新聞關鍵字：", value="", placeholder="e.g. 課輔班、相見歡、寒冬送暖"
         )
 
-    search_button = st.button("🚀 開始全網小報檢索與生成報表", use_container_width=True)
+    search_button = st.button("🚀 開始全網檢索與生成報表", use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     if search_button:
@@ -441,7 +450,12 @@ if sidebar_option == "🔍 檢索系統":
                 # 根據新聞連結進行去重
                 df_result = df_result.drop_duplicates(subset=["新聞連結"])
 
+                # 顯示成功提示訊息
                 st.success(f"🎉 成功捕捉到 {len(df_result)} 筆新聞！")
+                
+                # 觸發約 3 秒從下往上的氣球動態特效
+                st.balloons()
+
                 st.dataframe(df_result, use_container_width=True)
 
                 output = io.BytesIO()
