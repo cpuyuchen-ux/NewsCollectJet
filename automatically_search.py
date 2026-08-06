@@ -247,4 +247,3 @@ def run_news_pipeline(office, staff_name, org, keyword, year, media_map, GEMINI_
                     contents=prompt,
                     config=types.GenerateContentConfig(response_mime_type="application/json")
                 )
-             
