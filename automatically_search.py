@@ -10,7 +10,9 @@ import urllib.request
 import pandas as pd
 import streamlit as st
 
-# 防呆檢查：避免缺少 beautifulsoup4 導致網頁打不開
+# ---------------------------------------------------------------------------
+# 1. 套件載入與環境防呆
+# ---------------------------------------------------------------------------
 try:
     from bs4 import BeautifulSoup
 except ImportError:
@@ -19,12 +21,13 @@ except ImportError:
     )
     st.stop()
 
-# 防呆檢查：Gemini SDK
 try:
     from google import genai
     from google.genai import types
 except ImportError:
     genai = None
+
+# 頁面配置
 st.set_page_config(
     page_title="彰化家扶輿情自動檢索與報表生成系統",
     page_icon="📰",
@@ -40,6 +43,7 @@ if "last_api_date" not in st.session_state:
 if "search_history" not in st.session_state:
     st.session_state["search_history"] = []
 
+# 每日 API 計算器重置
 if st.session_state["last_api_date"] != datetime.date.today():
     st.session_state["api_count_today"] = 0
     st.session_state["last_api_date"] = datetime.date.today()
@@ -88,7 +92,7 @@ st.markdown(
         cursor: pointer;
     }
     div[data-testid="stRadio"] div[role="radiogroup"] > label p {
-        font-size: 1.2rem !important;
+        font-size: 1.1rem !important;
         font-weight: 600 !important;
     }
 </style>
@@ -172,25 +176,18 @@ def extract_reporter_sensor(text):
         r"記者\s*([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*[\u4e00-\u9fa5]+報導",
         r"記者\s*([\u4e00-\u9fa5]{2,4})\s*報導",
         r"([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*[\u4e00-\u9fa5]+報導",
-        r"(?<!新聞)(?<!家扶)(?<!媒體)(?<!即時)\b([\u4e00-\u9fa5]{2,4})\s*報導",
+        r"(?<!新聞)(?<!家扶)(?<!媒體)(?<!即時)(?<!中心)\b([\u4e00-\u9fa5]{2,4})\s*報導",
+    ]
+
+    exclude_words = [
+        "新聞", "家扶", "中心", "本報", "綜合", "特別",
+        "即時", "彰化", "地方", "責任", "編輯", "專題", "社會"
     ]
 
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
             name = match.group(1).strip()
-            exclude_words = [
-                "新聞",
-                "家扶",
-                "中心",
-                "本報",
-                "綜合",
-                "特別",
-                "即時",
-                "彰化",
-                "地方",
-                "責任",
-            ]
             if name not in exclude_words:
                 return name
     return "編輯部"
@@ -221,7 +218,11 @@ def parse_media_from_url_or_title(title, url):
         "udn.com": "聯合報",
         "chinatimes.com": "中國時報",
         "cna.com.tw": "中央社",
+        "pchome.com.tw": "PChome新聞",
+        "yam.com": "蕃新聞",
+        "yahoo.com": "Yahoo奇摩新聞",
     }
+
     for domain, name in domain_map.items():
         if domain in url:
             return name
@@ -230,30 +231,28 @@ def parse_media_from_url_or_title(title, url):
     match = re.search(r"[\-\|｜\_]\s*([^\-\|｜\_]+)$", title)
     if match:
         possible_media = match.group(1).strip()
-        if len(possible_media) <= 10:
+        if len(possible_media) <= 12:
             return possible_media
 
     return "地方網路新聞"
 
 
-def fetch_google_web_search(org, keyword, num_results=50):
+def fetch_google_web_search(org, keyword, num_results=40):
     """
     ⚡ 本地防爆全網爬蟲引擎：
-    直接對 Google 一般網頁搜尋進行 Html 抓取，專抓『警政時報』、『台中時報』等小報！
+    直接對 Google 一般網頁搜尋進行 HTML 抓取，專抓『警政時報』、『台中時報』等小報！
     """
     search_query = f"{org} {keyword}"
     encoded_query = urllib.parse.quote(search_query)
 
-    # 模擬標準桌面 Chrome 瀏覽器 Headers 避免被防爬蟲機制阻擋
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
     }
 
     results = []
+    pages = min(max(1, num_results // 10), 5)
 
-    # 分頁抓取 (每頁 10 筆)
-    pages = min(num_results // 10, 5)
     for page in range(pages):
         start = page * 10
         url = f"https://www.google.com/search?q={encoded_query}&start={start}&hl=zh-TW"
@@ -265,8 +264,12 @@ def fetch_google_web_search(org, keyword, num_results=50):
 
             soup = BeautifulSoup(html, "html.parser")
 
-            # 解析 Google 搜尋結果節點
-            for g in soup.find_all("div", class_="g"):
+            # 兼容 Google 搜尋頁面的多元 DOM 結構
+            g_elements = soup.find_all("div", class_="g")
+            if not g_elements:
+                g_elements = soup.find_all("div", class_="MjjYud")
+
+            for g in g_elements:
                 anchor = g.find("a")
                 title_elem = g.find("h3")
 
@@ -274,12 +277,13 @@ def fetch_google_web_search(org, keyword, num_results=50):
                     link = anchor.get("href", "")
                     title = title_elem.text.strip()
 
-                    # 排除非新聞網站（如 FB, YouTube, 家扶官網本身）
+                    # 排除非新聞/非相關頁面
                     if (
                         link.startswith("http")
                         and "facebook.com" not in link
                         and "youtube.com" not in link
                         and "ccf.org.tw" not in link
+                        and "instagram.com" not in link
                     ):
                         media_name = parse_media_from_url_or_title(title, link)
                         results.append(
@@ -290,9 +294,9 @@ def fetch_google_web_search(org, keyword, num_results=50):
                                 "date": datetime.date.today().strftime("%Y-%m-%d"),
                             }
                         )
-            time.sleep(1)  # 友善間隔，避免請求過快
-        except Exception as e:
-            st.warning(f"全網爬蟲頁面 {page+1} 讀取稍受限，已自動轉為精簡解析。")
+            time.sleep(1)  # 禮貌爬蟲間隔
+        except Exception:
+            st.warning(f"⚠️ 搜尋第 {page+1} 頁響應受限，自動切換安全模式。")
             break
 
     return results
@@ -310,7 +314,7 @@ def lookup_media_type(media_name, media_map):
 
 
 def clean_title_local(title):
-    """標題清理"""
+    """標題清理 (去除網站後綴)"""
     cleaned = re.sub(r"\s*[\-\|｜\_]\s*.*$", "", title)
     return cleaned.strip()
 
@@ -318,6 +322,7 @@ def clean_title_local(title):
 def run_news_pipeline(
     office, staff_name, org, keyword, year, media_map, GEMINI_API_KEY
 ):
+    # 記錄檢索歷史
     st.session_state["search_history"].append(
         {
             "檢索時間": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -329,20 +334,25 @@ def run_news_pipeline(
         }
     )
 
-    # 1. 啟動全網頁小報爬蟲
+    # 1. 啟動全網頁爬蟲
     with st.spinner(
-        f"🕷️ 正在搜尋全網頁新聞（含警政時報、台中時報等小報）『{org} {keyword}』..."
+        f"🕷️ 正在搜羅全網頁新聞（含警政時報、台中時報等地方小報）『{org} {keyword}』..."
     ):
         raw_results = fetch_google_web_search(org, keyword, num_results=40)
 
     if not raw_results:
-        st.error("❌ 未抓取到相關網頁，請檢查網路連線或關鍵字。")
+        st.error("❌ 未抓取到相關網頁，請嘗試換個關鍵字或檢查網路。")
         return []
 
-    # 2. 處理資料與 AI / Sensor 解析
-    results = []
-    client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+    # 2. 初始化 Gemini Client (若有提供 API Key)
+    client = None
+    if genai and GEMINI_API_KEY:
+        try:
+            client = genai.Client(api_key=GEMINI_API_KEY)
+        except Exception as e:
+            st.sidebar.warning(f"⚠️ Gemini 初始化失敗：{e}")
 
+    results = []
     progress_bar = st.progress(0)
     total_items = len(raw_results)
 
@@ -351,21 +361,21 @@ def run_news_pipeline(
         media_name = item["media_name"]
         m_type = lookup_media_type(media_name, media_map)
 
-        # 先啟動 Sensor 抓取記者姓名
+        # 本地 Sensor 優先抓取
         reporter_name = extract_reporter_sensor(item["title"])
 
-        # 若有 Gemini API，則進行標題修飾與年份對齊
-        if client and GEMINI_API_KEY:
+        # 若 Gemini 可用，進行 AI 語意淨化與深化解析
+        if client:
             try:
                 st.session_state["api_count_today"] += 1
                 prompt = f"""
                 請分析新聞標題：『{item['title']}』
-                1. 請清理標題，移除媒體後綴。
+                1. 請清理標題，移除媒體名稱或頻道後綴。
                 2. 嘗試辨識記者姓名 (若無則填 '{reporter_name}')。
-                傳回 JSON: {{"title": "純標題", "reporter": "記者" failure_safe}}
+                傳回 JSON 格式：{{"title": "純標題", "reporter": "記者姓名"}}
                 """
                 response = client.models.generate_content(
-                    model="gemini-1.5-flash",
+                    model="gemini-2.5-flash",
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json"
@@ -375,7 +385,8 @@ def run_news_pipeline(
                 cleaned_title = parsed.get("title", cleaned_title)
                 reporter_name = parsed.get("reporter", reporter_name)
             except Exception:
-                pass  # API 失敗自動流向本地 Sensor
+                # 遇到 API 配額上限或解析錯誤時無縫降級至本地 Sensor 處理
+                pass
 
         results.append(
             {
@@ -408,13 +419,15 @@ if sidebar_option == "🔍 檢索系統":
             "🏢 選擇服務處：",
             ["全部", "和美兒童館", "員林服務處", "彰化服務處", "二林服務處", "田中服務處"],
         )
-        org = st.text_input("🏛️ 搜尋機構名稱：", placeholder="e.g. 彰化家扶")
-        year_input = st.text_input("📅 目標年份：", placeholder="e.g. 2026")
+        org = st.text_input("🏛️ 搜尋機構名稱：", value="彰化家扶")
+        year_input = st.text_input(
+            "📅 目標年份：", value=str(datetime.date.today().year)
+        )
 
     with col2:
-        staff_name = st.text_input("👤 主責同工姓名：", placeholder="e.g. 彰化家扶小編")
+        staff_name = st.text_input("👤 主責同工姓名：", placeholder="e.g. 張小明")
         keyword = st.text_input(
-            "🔑 搜尋新聞關鍵字：", placeholder="e.g. 課輔班、相見歡"
+            "🔑 搜尋新聞關鍵字：", placeholder="e.g. 課輔班、相見歡、寒冬送暖"
         )
 
     search_button = st.button("🚀 開始全網小報檢索與生成報表", use_container_width=True)
@@ -422,7 +435,7 @@ if sidebar_option == "🔍 檢索系統":
 
     if search_button:
         if not org.strip() or not keyword.strip() or not staff_name.strip():
-            st.warning("⚠️ 請完整填寫機構、關鍵字與同工姓名！")
+            st.warning("⚠️ 請完整填寫機構、關鍵字與主責同工姓名！")
         else:
             try:
                 year = (
@@ -439,7 +452,7 @@ if sidebar_option == "🔍 檢索系統":
 
             if final_data:
                 df_result = pd.DataFrame(final_data)
-                # 去除重複網址
+                # 根據新聞連結進行去重
                 df_result = df_result.drop_duplicates(subset=["新聞連結"])
 
                 st.success(f"🎉 成功捕捉到 {len(df_result)} 筆新聞（含小報）！")
@@ -465,11 +478,11 @@ elif sidebar_option == "💡 系統簡介":
         """
     **彰化家扶中心輿情自動檢索與報表生成系統**旨在幫助同工快速彙整網路媒體報導。
 
-    * **即時檢索**：自動爬取 Google News 最新相關新聞。
+    * **即時檢索**：自動爬取 Google 最新相關新聞與網頁報導。
     * **AI 結構化整理**：運用 Gemini AI 自動識別新聞標題、發布年份、記者姓名、對照媒體分類（三大報/非三大報等）並進行資料淨化。
     * **一鍵報表**：自動產出包含服務處、主責查詢同工、媒體分類與超連結的標準化 Excel 檔案，提升行政與輿情整理效率。
     * **模組化減速**：批次發送檢索要求，避免觸發 Google 反爬蟲機制（Anti-Scraping）。
-    * **本地備用演算法防爆機制**：優先使用 Gemini 進行精準解析；若 API限流則自動啟動「本地防爆演算法」，保障 100% 順利產出。
+    * **本地備用演算法防爆機制**：優先使用 Gemini 進行精準解析；若 API 限流則自動啟動「本地防爆演算法」，保障 100% 順利產出。
     * **擺脫 Google News RSS 限制**：採用 Python 本地 BeautifulSoup 技術，直接抓取 Google 一般網頁搜尋，包含小報與地方新聞網（警政時報、台中時報、PeoPo公民新聞等）。
     * **自動域名識別**：自動從網址與標題辨識出小報名稱。
     * **記者姓名 Sensor 強化**：即使小報格式多變，亦能靠正則表達式提取「記者姓名」。
@@ -482,14 +495,14 @@ elif sidebar_option == "📌 系統須知":
     st.warning(
         """
     1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用，嚴禁用於商業爬蟲、網路攻擊或任何非法用途！
-    2. **API 額度雙保險機制**：系統採用 Gemini 1.5 Flash 模型，若遇到 429 配額額滿，會自動無縫轉入「本地 Sensor 演算法」，確保記者與資料不遺漏！
+    2. **API 額度雙保險機制**：系統採用 Gemini 2.5 Flash 模型，若遇到 429 配額額滿，會自動無縫轉入「本地 Sensor 演算法」，確保記者與資料不遺漏！
     3. **資料準確性**：AI 與 Sensor 解析結果僅供參考，匯出報表後建議人工進行二次核對，尤其檢核奧丁丁新聞、PChome新聞、蕃新聞、奇摩新聞等4家媒體，確認有無遺漏。
     4. **中心 PDF 檔留存**：報表生成後，請將每一篇報導儲存成 PDF 檔，放置於中心查報資料夾備查。
     5. **人工調整格式**：報表生成後，請配合將資料貼入「2026年單位季報_媒體統計格式」之 excel 檔，並視情況補充記者姓名。
     6. **非網路新聞補充**：本系統僅能抓取網路電子新聞，紙本報紙、電台廣播、電視新聞等露出請務必人工補充，俾使資料趨於完整。
     """
     )
-    
+
 elif sidebar_option == "🔐 系統管理員":
     st.subheader("🔐 系統管理員後台")
     admin_key = st.text_input("🔑 請輸入管理員金鑰：", type="password")
@@ -526,4 +539,4 @@ elif sidebar_option == "🔐 系統管理員":
         else:
             st.info("目前尚無搜尋歷史紀錄。")
     elif admin_key:
-        st.error("❌ 金鑰錯誤！") 
+        st.error("❌ 金鑰錯誤！")
