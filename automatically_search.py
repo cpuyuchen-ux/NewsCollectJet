@@ -97,14 +97,18 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
-# 3. 側邊欄與資料庫讀取
+# 3. 側邊欄與資料庫讀取（已修改為單選頁籤）
 # ---------------------------------------------------------------------------
-st.sidebar.title("⚙️ 系統核心設定")
+st.sidebar.title("⚙️ 系統功能導覽")
 
-sidebar_option = st.sidebar.selectbox(
+# 將 selectbox 改為 radio，使選項直接呈現於側邊欄
+sidebar_option = st.sidebar.radio(
     "請選擇功能模組：",
-    ["檢索系統", "系統簡介", "系統須知", "系統管理員"],
+    ["🔍 檢索系統", "💡 系統簡介", "📌 系統須知", "🔐 系統管理員"],
+    index=0
 )
+
+st.sidebar.markdown("---")
 
 api_key = st.secrets.get("GEMINI_API_KEY", "")
 if not api_key:
@@ -325,7 +329,7 @@ def run_news_pipeline(
 # ---------------------------------------------------------------------------
 # 5. 功能模組控制與頁面渲染
 # ---------------------------------------------------------------------------
-if sidebar_option == "檢索系統":
+if sidebar_option == "🔍 檢索系統":
     st.markdown('<div class="search-card">', unsafe_allow_html=True)
     st.subheader("🔍 新聞輿情搜尋條件")
 
@@ -398,7 +402,7 @@ if sidebar_option == "檢索系統":
             else:
                 st.info("ℹ️ 未檢索到相關新聞，請嘗試更換關鍵字或年份。")
 
-elif sidebar_option == "系統簡介":
+elif sidebar_option == "💡 系統簡介":
     st.subheader("💡 系統簡介")
     st.markdown(
         """
@@ -412,7 +416,7 @@ elif sidebar_option == "系統簡介":
     """
     )
 
-elif sidebar_option == "系統須知":
+elif sidebar_option == "📌 系統須知":
     st.subheader("📌 系統須知與使用規範")
     st.warning(
         """
@@ -420,12 +424,12 @@ elif sidebar_option == "系統須知":
     2. **API額度雙保險機制**：系統採用 Gemini 1.5 Flash 模型，若仍遇到 429 配額額滿，會自動無縫轉入「本地純文字演算法」，確保資料不遺漏！
     3. **資料準確性**：AI自動解析結果僅供參考，匯出報表後建議人工進行二次核對，尤其檢核奧丁丁新聞、PChome新聞、蕃新聞、奇摩新聞等4家媒體，確認有無遺漏。
     4. **中心PDF檔留存**：報表生成後，請將每一篇報導儲存成PDF檔，放置於中心查報資料夾備查。
-    5. **人工調整格式**：報表生成後，請配合將資料貼入會「2026年單位季報_媒體統計格式」之excel檔，並視情況補充記者姓名。
+    5. **人工調整格式**：報表生成後，請配合將資料貼入「2026年單位季報_媒體統計格式」之excel檔，並視情況補充記者姓名。
     6. **非網路新聞補充**：本系統僅能抓取網路電子新聞，紙本報紙、電台廣播、電視新聞等露出請務必人工補充，俾使資料趨於完整。
     """
     )
 
-elif sidebar_option == "系統管理員":
+elif sidebar_option == "🔐 系統管理員":
     st.subheader("🔐 系統管理員後台")
     admin_key = st.text_input("🔑 請輸入管理員金鑰：", type="password")
 
