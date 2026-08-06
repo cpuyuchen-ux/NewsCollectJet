@@ -6,6 +6,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 
 import pandas as pd
 import streamlit as st
@@ -165,7 +166,7 @@ if os.path.exists(db_file_path):
         st.sidebar.error(f"❌ 讀取 database.csv 失敗: {e}")
 
 # ---------------------------------------------------------------------------
-# 4. 關鍵演算法：Google 全網頁無 API 爬蟲 + 記者 Sensor
+# 4. 關鍵演算法：Google RSS 穩定檢索 + 記者 Sensor
 # ---------------------------------------------------------------------------
 def extract_reporter_sensor(text):
     """記者姓名辨識 Sensor：以 Regex 抓取『記者○○○報導』或『○○○/地區報導』"""
@@ -193,8 +194,11 @@ def extract_reporter_sensor(text):
     return "編輯部"
 
 
-def parse_media_from_url_or_title(title, url):
-    """本地辨識小報媒體名稱 (當 Google 沒標註媒體時)"""
+def parse_media_from_url_or_title(title, url, source_elem_text=None):
+    """本地辨識媒體名稱"""
+    if source_elem_text and source_elem_text.strip():
+        return source_elem_text.strip()
+
     domain_map = {
         "news.owlting.com": "奧丁丁新聞",
         "886.news": "警政時報",
@@ -227,7 +231,6 @@ def parse_media_from_url_or_title(title, url):
         if domain in url:
             return name
 
-    # 從標題後綴提取
     match = re.search(r"[\-\|｜\_]\s*([^\-\|｜\_]+)$", title)
     if match:
         possible_media = match.group(1).strip()
@@ -237,67 +240,45 @@ def parse_media_from_url_or_title(title, url):
     return "地方網路新聞"
 
 
-def fetch_google_web_search(org, keyword, num_results=40):
+def fetch_google_news_rss(org, keyword):
     """
-    ⚡ 本地防爆全網爬蟲引擎：
-    直接對 Google 一般網頁搜尋進行 HTML 抓取，專抓『警政時報』、『台中時報』等小報！
+    ⚡ 高穩定 Google News RSS 檢索引擎：
+    免 API 金鑰、不鎖 IP，能大幅涵蓋全網地方新聞與各大報社。
     """
     search_query = f"{org} {keyword}"
     encoded_query = urllib.parse.quote(search_query)
+    rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
     }
 
     results = []
-    pages = min(max(1, num_results // 10), 5)
+    try:
+        req = urllib.request.Request(rss_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            xml_data = response.read()
 
-    for page in range(pages):
-        start = page * 10
-        url = f"https://www.google.com/search?q={encoded_query}&start={start}&hl=zh-TW"
+        root = ET.fromstring(xml_data)
+        for item in root.findall(".//item"):
+            title = item.find("title").text if item.find("title") is not None else ""
+            link = item.find("link").text if item.find("link") is not None else ""
+            pub_date = item.find("pubDate").text if item.find("pubDate") is not None else ""
+            source_elem = item.find("source")
+            source_text = source_elem.text if source_elem is not None else ""
 
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=8) as response:
-                html = response.read().decode("utf-8")
-
-            soup = BeautifulSoup(html, "html.parser")
-
-            # 兼容 Google 搜尋頁面的多元 DOM 結構
-            g_elements = soup.find_all("div", class_="g")
-            if not g_elements:
-                g_elements = soup.find_all("div", class_="MjjYud")
-
-            for g in g_elements:
-                anchor = g.find("a")
-                title_elem = g.find("h3")
-
-                if anchor and title_elem:
-                    link = anchor.get("href", "")
-                    title = title_elem.text.strip()
-
-                    # 排除非新聞/非相關頁面
-                    if (
-                        link.startswith("http")
-                        and "facebook.com" not in link
-                        and "youtube.com" not in link
-                        and "ccf.org.tw" not in link
-                        and "instagram.com" not in link
-                    ):
-                        media_name = parse_media_from_url_or_title(title, link)
-                        results.append(
-                            {
-                                "title": title,
-                                "url": link,
-                                "media_name": media_name,
-                                "date": datetime.date.today().strftime("%Y-%m-%d"),
-                            }
-                        )
-            time.sleep(1)  # 禮貌爬蟲間隔
-        except Exception:
-            st.warning(f"⚠️ 搜尋第 {page+1} 頁響應受限，自動切換安全模式。")
-            break
+            if title and link:
+                media_name = parse_media_from_url_or_title(title, link, source_text)
+                results.append(
+                    {
+                        "title": title,
+                        "url": link,
+                        "media_name": media_name,
+                        "date": pub_date,
+                    }
+                )
+    except Exception as e:
+        st.error(f"⚠️ RSS 檢索出現異常：{e}")
 
     return results
 
@@ -334,14 +315,14 @@ def run_news_pipeline(
         }
     )
 
-    # 1. 啟動全網頁爬蟲
+    # 1. 啟動 RSS 穩定爬蟲
     with st.spinner(
-        f"🕷️ 正在搜羅全網頁新聞（含警政時報、台中時報等地方小報）『{org} {keyword}』..."
+        f"🕷️ 正在搜羅全網新聞報導（含地方新聞與全網新聞網）『{org} {keyword}』..."
     ):
-        raw_results = fetch_google_web_search(org, keyword, num_results=40)
+        raw_results = fetch_google_news_rss(org, keyword)
 
     if not raw_results:
-        st.error("❌ 未抓取到相關網頁，請嘗試換個關鍵字或檢查網路。")
+        st.error("❌ 未抓取到相關網頁，請嘗試更換關鍵字。")
         return []
 
     # 2. 初始化 Gemini Client (若有提供 API Key)
@@ -361,7 +342,7 @@ def run_news_pipeline(
         media_name = item["media_name"]
         m_type = lookup_media_type(media_name, media_map)
 
-        # 本地 Sensor 優先抓取
+        # 本地 Sensor 優先抓取記者姓名
         reporter_name = extract_reporter_sensor(item["title"])
 
         # 若 Gemini 可用，進行 AI 語意淨化與深化解析
@@ -407,7 +388,7 @@ def run_news_pipeline(
 
 
 # ---------------------------------------------------------------------------
-# 5. UI 與主流程控制
+# 5. UI 與主流程控制（已修復 Placeholder 浮水印）
 # ---------------------------------------------------------------------------
 if sidebar_option == "🔍 檢索系統":
     st.markdown('<div class="search-card">', unsafe_allow_html=True)
@@ -419,35 +400,40 @@ if sidebar_option == "🔍 檢索系統":
             "🏢 選擇服務處：",
             ["全部", "和美兒童館", "員林服務處", "彰化服務處", "二林服務處", "田中服務處"],
         )
-        org = st.text_input("🏛️ 搜尋機構名稱：", value="彰化家扶")
+        # 修正：將範例寫入 placeholder 保持 value 為空，達成點擊即刻打字效果
+        org = st.text_input(
+            "🏛️ 搜尋機構名稱：", value="", placeholder="e.g. 彰化家扶"
+        )
         year_input = st.text_input(
-            "📅 目標年份：", value=str(datetime.date.today().year)
+            "📅 目標年份：", value="", placeholder=f"e.g. {datetime.date.today().year}"
         )
 
     with col2:
-        staff_name = st.text_input("👤 主責同工姓名：", placeholder="e.g. 張小明")
+        staff_name = st.text_input("👤 主責同工姓名：", value="", placeholder="e.g. 張小明")
         keyword = st.text_input(
-            "🔑 搜尋新聞關鍵字：", placeholder="e.g. 課輔班、相見歡、寒冬送暖"
+            "🔑 搜尋新聞關鍵字：", value="", placeholder="e.g. 課輔班、相見歡、寒冬送暖"
         )
 
     search_button = st.button("🚀 開始全網小報檢索與生成報表", use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     if search_button:
-        if not org.strip() or not keyword.strip() or not staff_name.strip():
-            st.warning("⚠️ 請完整填寫機構、關鍵字與主責同工姓名！")
-        else:
-            try:
-                year = (
-                    int(year_input.strip())
-                    if year_input.strip()
-                    else datetime.date.today().year
-                )
-            except ValueError:
-                year = datetime.date.today().year
+        # 設有預設值相容 (若沒填機構預設帶入彰化家扶，年份帶入今年)
+        target_org = org.strip() if org.strip() else "彰化家扶"
+        try:
+            year = (
+                int(year_input.strip())
+                if year_input.strip()
+                else datetime.date.today().year
+            )
+        except ValueError:
+            year = datetime.date.today().year
 
+        if not keyword.strip() or not staff_name.strip():
+            st.warning("⚠️ 請完整填寫「搜尋新聞關鍵字」與「主責同工姓名」！")
+        else:
             final_data = run_news_pipeline(
-                office, staff_name, org, keyword, year, media_type_map, api_key
+                office, staff_name, target_org, keyword, year, media_type_map, api_key
             )
 
             if final_data:
@@ -455,7 +441,7 @@ if sidebar_option == "🔍 檢索系統":
                 # 根據新聞連結進行去重
                 df_result = df_result.drop_duplicates(subset=["新聞連結"])
 
-                st.success(f"🎉 成功捕捉到 {len(df_result)} 筆新聞（含小報）！")
+                st.success(f"🎉 成功捕捉到 {len(df_result)} 筆新聞！")
                 st.dataframe(df_result, use_container_width=True)
 
                 output = io.BytesIO()
@@ -467,7 +453,7 @@ if sidebar_option == "🔍 檢索系統":
                 st.download_button(
                     label="📥 下載輿情統計 Excel 報表",
                     data=output.getvalue(),
-                    file_name=f"{org}_{keyword}_全網輿情報表.xlsx",
+                    file_name=f"{target_org}_{keyword}_全網輿情報表.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
@@ -483,7 +469,7 @@ elif sidebar_option == "💡 系統簡介":
     * **一鍵報表**：自動產出包含服務處、主責查詢同工、媒體分類與超連結的標準化 Excel 檔案，提升行政與輿情整理效率。
     * **模組化減速**：批次發送檢索要求，避免觸發 Google 反爬蟲機制（Anti-Scraping）。
     * **本地備用演算法防爆機制**：優先使用 Gemini 進行精準解析；若 API 限流則自動啟動「本地防爆演算法」，保障 100% 順利產出。
-    * **擺脫 Google News RSS 限制**：採用 Python 本地 BeautifulSoup 技術，直接抓取 Google 一般網頁搜尋，包含小報與地方新聞網（警政時報、台中時報、PeoPo公民新聞等）。
+    * **高穩定 RSS 搜尋**：採用 XML 解析 Google RSS 頻道，打破一般爬蟲容易被檔 IP 的限制，自動包含地方新聞網與小報。
     * **自動域名識別**：自動從網址與標題辨識出小報名稱。
     * **記者姓名 Sensor 強化**：即使小報格式多變，亦能靠正則表達式提取「記者姓名」。
     """
