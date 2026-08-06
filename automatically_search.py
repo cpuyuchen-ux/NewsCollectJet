@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import ssl
 import time
 import urllib.parse
 import urllib.request
@@ -23,10 +24,23 @@ except ImportError:
     st.stop()
 
 try:
+    import openpyxl
+except ImportError:
+    st.error(
+        "❌ 系統缺少 'openpyxl' 套件（匯出 Excel 必備）！請在終端機執行：pip install openpyxl"
+    )
+    st.stop()
+
+try:
     from google import genai
     from google.genai import types
 except ImportError:
     genai = None
+
+# 全域 SSL context，避免爬取特定網站時因憑證過期/異常而報錯崩潰
+ssl_context = ssl.create_default_context()
+ssl_context.check_hostname = False
+ssl_context.verify_mode = ssl.CERT_NONE
 
 # 頁面配置
 st.set_page_config(
@@ -166,36 +180,46 @@ if os.path.exists(db_file_path):
         st.sidebar.error(f"❌ 讀取 database.csv 失敗: {e}")
 
 # ---------------------------------------------------------------------------
-# 4. 關鍵演算法：HTTP Fetch + 雙重過濾 + 強化記者 Sensor
+# 4. 關鍵演算法：HTTP Fetch + 雙重過濾 + 強化記者 Sensor + 防爆設計
 # ---------------------------------------------------------------------------
 
 def fetch_article_text(url):
-    """嘗試取得新聞網頁的前段內文，用於精準抓取記者姓名與過濾雜訊"""
+    """嘗試取得新聞網頁的前段內文，用於精準抓取記者姓名與過濾雜訊 (含防爆機制)"""
+    if not url or not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return ""
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
     try:
         req = urllib.request.Request(url, headers=headers)
-        # 設定短 timeout (3秒)，避免爬蟲卡死
-        with urllib.request.urlopen(req, timeout=3) as response:
-            html = response.read().decode("utf-8", errors="ignore")
+        # 加入 context=ssl_context 防護憑證問題
+        with urllib.request.urlopen(req, timeout=4, context=ssl_context) as response:
+            # 防爆：動態檢查編碼，若無預設為 utf-8
+            charset = response.headers.get_param("charset") or "utf-8"
+            try:
+                html = response.read().decode(charset, errors="replace")
+            except Exception:
+                html = response.read().decode("utf-8", errors="ignore")
+
             soup = BeautifulSoup(html, "html.parser")
-            
+
             # 移除腳本與樣式標籤
-            for script in soup(["script", "style"]):
+            for script in soup(["script", "style", "noscript", "header", "footer"]):
                 script.extract()
-                
+
             text = soup.get_text(separator=" ")
             # 清理空白字元並截取前 1000 字（記者名字通常在開頭）
             clean_text = re.sub(r"\s+", " ", text).strip()
             return clean_text[:1000]
     except Exception:
+        # 防爆：避免連線逾時、404、403、SSL錯誤中斷整個流程
         return ""
 
 
 def extract_reporter_sensor(text):
-    """高精度記者姓名辨識 Sensor：支援更多常見媒體記者格式"""
-    if not text:
+    """高精度記者姓名辨識 Sensor：支援更多常見媒體記者格式 (含防爆機制)"""
+    if not text or not isinstance(text, str):
         return "編輯部"
 
     patterns = [
@@ -219,18 +243,24 @@ def extract_reporter_sensor(text):
     ]
 
     for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            name = match.group(1).strip()
-            if name not in exclude_words:
-                return name
+        try:
+            match = re.search(pattern, text)
+            if match:
+                name = match.group(1).strip()
+                if name not in exclude_words:
+                    return name
+        except Exception:
+            continue
     return "編輯部"
 
 
 def parse_media_from_url_or_title(title, url, source_elem_text=None):
-    """本地辨識媒體名稱"""
-    if source_elem_text and source_elem_text.strip():
-        return source_elem_text.strip()
+    """本地辨識媒體名稱 (含防爆機制)"""
+    title = str(title) if title else ""
+    url = str(url) if url else ""
+
+    if source_elem_text and str(source_elem_text).strip():
+        return str(source_elem_text).strip()
 
     domain_map = {
         "news.owlting.com": "奧丁丁新聞",
@@ -264,21 +294,22 @@ def parse_media_from_url_or_title(title, url, source_elem_text=None):
         if domain in url:
             return name
 
-    match = re.search(r"[\-\|｜\_]\s*([^\-\|｜\_]+)$", title)
-    if match:
-        possible_media = match.group(1).strip()
-        if len(possible_media) <= 12:
-            return possible_media
+    try:
+        match = re.search(r"[\-\|｜\_]\s*([^\-\|｜\_]+)$", title)
+        if match:
+            possible_media = match.group(1).strip()
+            if len(possible_media) <= 12:
+                return possible_media
+    except Exception:
+        pass
 
     return "地方網路新聞"
 
 
 def fetch_google_news_rss(org, keyword):
     """
-    ⚡ 高穩定 Google News RSS 檢索引擎：
-    加入嚴格雙引號語意檢索，降低無關新聞占比。
+    ⚡ 高穩定 Google News RSS 檢索引擎 (含完整 SSL 與 XML 解析防爆)
     """
-    # 使用雙引號強烈限制搜尋範疇
     search_query = f'"{org}" "{keyword}"'
     encoded_query = urllib.parse.quote(search_query)
     rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
@@ -290,27 +321,30 @@ def fetch_google_news_rss(org, keyword):
     results = []
     try:
         req = urllib.request.Request(rss_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
             xml_data = response.read()
 
         root = ET.fromstring(xml_data)
         for item in root.findall(".//item"):
-            title = item.find("title").text if item.find("title") is not None else ""
-            link = item.find("link").text if item.find("link") is not None else ""
-            pub_date = item.find("pubDate").text if item.find("pubDate") is not None else ""
-            source_elem = item.find("source")
-            source_text = source_elem.text if source_elem is not None else ""
+            try:
+                title = item.find("title").text if item.find("title") is not None else ""
+                link = item.find("link").text if item.find("link") is not None else ""
+                pub_date = item.find("pubDate").text if item.find("pubDate") is not None else ""
+                source_elem = item.find("source")
+                source_text = source_elem.text if source_elem is not None else ""
 
-            if title and link:
-                media_name = parse_media_from_url_or_title(title, link, source_text)
-                results.append(
-                    {
-                        "title": title,
-                        "url": link,
-                        "media_name": media_name,
-                        "date": pub_date,
-                    }
-                )
+                if title and link:
+                    media_name = parse_media_from_url_or_title(title, link, source_text)
+                    results.append(
+                        {
+                            "title": title,
+                            "url": link,
+                            "media_name": media_name,
+                            "date": pub_date,
+                        }
+                    )
+            except Exception:
+                continue # 單一項目解析失敗自動跳過
     except Exception as e:
         st.error(f"⚠️ RSS 檢索出現異常：{e}")
 
@@ -318,7 +352,10 @@ def fetch_google_news_rss(org, keyword):
 
 
 def lookup_media_type(media_name, media_map):
-    """對照媒體類別"""
+    """對照媒體類別 (含防爆機制)"""
+    if not media_name:
+        return "非三大報全國性"
+    
     m_name = str(media_name).strip()
     if m_name in media_map:
         return media_map[m_name]
@@ -329,9 +366,14 @@ def lookup_media_type(media_name, media_map):
 
 
 def clean_title_local(title):
-    """標題清理 (去除網站後綴)"""
-    cleaned = re.sub(r"\s*[\-\|｜\_]\s*.*$", "", title)
-    return cleaned.strip()
+    """標題清理 (去除網站後綴，含防爆)"""
+    if not title:
+        return ""
+    try:
+        cleaned = re.sub(r"\s*[\-\|｜\_]\s*.*$", "", str(title))
+        return cleaned.strip()
+    except Exception:
+        return str(title)
 
 
 def run_news_pipeline(
@@ -420,12 +462,20 @@ def run_news_pipeline(
                         response_mime_type="application/json"
                     ),
                 )
-                parsed = json.loads(response.text)
+                
+                # 防爆：清理可能包含 Markdown 標記的字串
+                raw_json = response.text.strip()
+                if raw_json.startswith("```json"):
+                    raw_json = raw_json.split("```json")[1].split("```")[0].strip()
+                elif raw_json.startswith("```"):
+                    raw_json = raw_json.split("```")[1].split("```")[0].strip()
+
+                parsed = json.loads(raw_json)
                 is_relevant = parsed.get("is_relevant", True)
                 cleaned_title = parsed.get("title", cleaned_title)
                 reporter_name = parsed.get("reporter", reporter_name)
             except Exception:
-                # API 異常時降級為本地邏輯，保留項目
+                # 防爆：API 異常、解析失敗時自動降級為本地邏輯，保留項目
                 pass
 
         # 若 AI 認定為無關新聞，則予以剔除
@@ -481,12 +531,11 @@ if sidebar_option == "🔍 檢索系統":
 
     if search_button:
         target_org = org.strip() if org.strip() else "彰化家扶"
+        
+        # 年份防爆轉型
         try:
-            year = (
-                int(year_input.strip())
-                if year_input.strip()
-                else datetime.date.today().year
-            )
+            clean_year_str = re.sub(r"\D", "", year_input.strip())
+            year = int(clean_year_str) if clean_year_str else datetime.date.today().year
         except ValueError:
             year = datetime.date.today().year
 
@@ -494,7 +543,7 @@ if sidebar_option == "🔍 檢索系統":
             st.warning("⚠️ 請完整填寫「搜尋新聞關鍵字」與「主責同工姓名」！")
         else:
             final_data = run_news_pipeline(
-                office, staff_name, target_org, keyword, year, media_type_map, api_key
+                office, staff_name.strip(), target_org, keyword.strip(), year, media_type_map, api_key
             )
 
             if final_data:
@@ -505,19 +554,23 @@ if sidebar_option == "🔍 檢索系統":
                 st.balloons()
                 st.dataframe(df_result, use_container_width=True)
 
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                    df_result.to_excel(
-                        writer, index=False, sheet_name="新聞輿情統計"
-                    )
+                # Excel 生成防爆
+                try:
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                        df_result.to_excel(
+                            writer, index=False, sheet_name="新聞輿情統計"
+                        )
 
-                st.download_button(
-                    label="📥 下載輿情統計 Excel 報表",
-                    data=output.getvalue(),
-                    file_name=f"{target_org}_{keyword}_精準輿情報表.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+                    st.download_button(
+                        label="📥 下載輿情統計 Excel 報表",
+                        data=output.getvalue(),
+                        file_name=f"{target_org}_{keyword}_精準輿情報表.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+                except Exception as e:
+                    st.error(f"❌ 產出 Excel 報表時發生錯誤：{e}")
             else:
                 st.info("ℹ️ 未能找到符合條件的新聞，或過濾後無相關結果。建議擴大關鍵字範圍試試！")
 
@@ -567,19 +620,22 @@ elif sidebar_option == "🔐 系統管理員":
             history_df = pd.DataFrame(st.session_state["search_history"])
             st.dataframe(history_df, use_container_width=True)
 
-            history_output = io.BytesIO()
-            with pd.ExcelWriter(history_output, engine="openpyxl") as writer:
-                history_df.to_excel(
-                    writer, index=False, sheet_name="系統使用統計"
-                )
+            try:
+                history_output = io.BytesIO()
+                with pd.ExcelWriter(history_output, engine="openpyxl") as writer:
+                    history_df.to_excel(
+                        writer, index=False, sheet_name="系統使用統計"
+                    )
 
-            st.download_button(
-                label="📥 匯出管理員統計報表 (Excel)",
-                data=history_output.getvalue(),
-                file_name=f"系統使用紀錄_{datetime.date.today()}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
+                st.download_button(
+                    label="📥 匯出管理員統計報表 (Excel)",
+                    data=history_output.getvalue(),
+                    file_name=f"系統使用紀錄_{datetime.date.today()}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.error(f"❌ 產出管理員報表失敗：{e}")
         else:
             st.info("目前尚無搜尋歷史紀錄。")
     elif admin_key:
