@@ -116,16 +116,15 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
-# 3. 側邊欄與資料庫讀取（已修改為單選頁籤）
+# 3. 側邊欄與資料庫讀取
 # ---------------------------------------------------------------------------
 st.sidebar.title("⚙️ 系統功能導覽")
 
-# 將 label_visibility 設為 collapsed 以隱藏「請選擇功能模組：」
 sidebar_option = st.sidebar.radio(
     "請選擇功能模組：",
     ["🔍 檢索系統", "💡 系統簡介", "📌 系統須知", "🔐 系統管理員"],
     index=0,
-    label_visibility="collapsed"
+    label_visibility="collapsed",
 )
 
 st.sidebar.markdown("---")
@@ -160,7 +159,7 @@ if os.path.exists(db_file_path):
         st.sidebar.error(f"❌ 讀取 database.csv 失敗: {e}")
 
 # ---------------------------------------------------------------------------
-# 4. 輔助函式定義
+# 4. 輔助函式與記者辨識 Sensor 定義
 # ---------------------------------------------------------------------------
 def render_airplane_progress(percent, text=""):
     return f"""
@@ -195,6 +194,49 @@ def clean_title_local(title, media_name=""):
     return cleaned.strip()
 
 
+def extract_reporter_sensor(text):
+    """
+    記者姓名辨識 Sensor：
+    透過正則表達式（Regex）掃描標題或文字，捕捉特定模式並提取「○○○」記者姓名變數。
+    """
+    if not text:
+        return "編輯部"
+
+    # 定義比對模式（優先順序由嚴格到寬鬆）
+    patterns = [
+        # 模式 1: 記者○○○/彰化報導 或 記者○○○／台北報導
+        r"記者\s*([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*[\u4e00-\u9fa5]+報導",
+        # 模式 2: 記者○○○報導
+        r"記者\s*([\u4e00-\u9fa5]{2,4})\s*報導",
+        # 模式 3: ○○○/彰化報導 或 ○○○／台北報導
+        r"([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*[\u4e00-\u9fa5]+報導",
+        # 模式 4: ○○○報導 (排除常見非人名詞彙，避免誤抓)
+        r"(?<!新聞)(?<!家扶)(?<!媒體)(?<!即時)\b([\u4e00-\u9fa5]{2,4})\s*報導",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            name = match.group(1).strip()
+            # 關鍵字防呆，確保抓到的不是非人名字詞
+            exclude_words = [
+                "新聞",
+                "家扶",
+                "中心",
+                "本報",
+                "綜合",
+                "特別",
+                "即時",
+                "彰化",
+                "地方",
+                "責任",
+            ]
+            if name not in exclude_words:
+                return name
+
+    return "編輯部"
+
+
 def run_news_pipeline(
     office, staff_name, org, keyword, year, media_map, GEMINI_API_KEY
 ):
@@ -224,10 +266,20 @@ def run_news_pipeline(
                 xml_data = response.read()
             root = ET.fromstring(xml_data)
             for item in root.findall(".//item"):
-                title = item.find("title").text if item.find("title") is not None else ""
+                title = (
+                    item.find("title").text if item.find("title") is not None else ""
+                )
                 link = item.find("link").text if item.find("link") is not None else ""
-                pub_date = item.find("pubDate").text if item.find("pubDate") is not None else ""
-                source = item.find("source").text if item.find("source") is not None else "新聞媒體"
+                pub_date = (
+                    item.find("pubDate").text
+                    if item.find("pubDate") is not None
+                    else ""
+                )
+                source = (
+                    item.find("source").text
+                    if item.find("source") is not None
+                    else "新聞媒體"
+                )
 
                 raw_results.append(
                     {
@@ -273,7 +325,9 @@ def run_news_pipeline(
         prompt = f"""
         新聞列表：{json.dumps(batch_payload, ensure_ascii=False)}
         條件：發布年份須為 {year}，標題或內容需包含 {org} 或 {keyword}。
-        請去除標題末端媒體名稱後綴（如「 - 自由時報」），並提取記者姓名 (若無填 '編輯部')。
+        請去除標題末端媒體名稱後綴（如「 - 自由時報」）。
+        特別辨識：請檢查新聞標題中是否有「記者○○○報導」、「○○○報導」或「記者○○○/地區報導」等模式，並提取「○○○」作為記者姓名 (若辨識不到請填 '編輯部')。
+
         傳回 JSON 格式：
         {{"articles": [{{"id": 0, "media_name": "媒體名稱", "title": "純標題", "reporter": "記者姓名"}}]}}
         """
@@ -299,6 +353,12 @@ def run_news_pipeline(
                             parsed.get("media_name", item_orig["media_name"]),
                             media_map,
                         )
+
+                        # 如果 AI 抓出來是預設的編輯部，再以本地 Sensor 二次複驗防呆
+                        reporter_name = parsed.get("reporter", "編輯部")
+                        if reporter_name == "編輯部":
+                            reporter_name = extract_reporter_sensor(item_orig["title"])
+
                         results.append(
                             {
                                 "服務處": office,
@@ -310,7 +370,7 @@ def run_news_pipeline(
                                 "新聞標題": parsed.get(
                                     "title", clean_title_local(item_orig["title"])
                                 ),
-                                "記者": parsed.get("reporter", "編輯部"),
+                                "記者": reporter_name,
                                 "新聞連結": item_orig["url"],
                             }
                         )
@@ -319,17 +379,23 @@ def run_news_pipeline(
                 except Exception:
                     time.sleep(1)
 
+        # 啟動本地防爆機制 (Fallback)
         if not success:
             for item in batch:
                 m_type = lookup_media_type(item["media_name"], media_map)
+                # 📡 使用 Sensor 自動提取記者姓名
+                detected_reporter = extract_reporter_sensor(item["title"])
+
                 results.append(
                     {
                         "服務處": office,
                         "查報同工": staff_name,
                         "媒體名稱": item["media_name"],
                         "媒體類別": m_type,
-                        "新聞標題": clean_title_local(item["title"], item["media_name"]),
-                        "記者": "編輯部",
+                        "新聞標題": clean_title_local(
+                            item["title"], item["media_name"]
+                        ),
+                        "記者": detected_reporter,
                         "新聞連結": item["url"],
                     }
                 )
@@ -392,7 +458,11 @@ if sidebar_option == "🔍 檢索系統":
         else:
             # 驗證年份格式
             try:
-                year = int(year_input.strip()) if year_input.strip() else datetime.date.today().year
+                year = (
+                    int(year_input.strip())
+                    if year_input.strip()
+                    else datetime.date.today().year
+                )
             except ValueError:
                 st.error("❌ 年份請輸入有效的西元年數字（例如：2026）")
                 st.stop()
@@ -429,10 +499,10 @@ elif sidebar_option == "💡 系統簡介":
     **彰化家扶中心輿情自動檢索與報表生成系統** 旨在幫助同工快速彙整網路媒體報導。
     
     * **即時檢索**：自動爬取 Google News 最新相關新聞。
-    * **AI 結構化整理**：運用 Gemini AI 自動識別新聞標題、發布年份、記者姓名、對照媒體分類（三大報/非三大報等）並進行資料淨化。
+    * **AI 與 Sensor 雙重解析**：運用 Gemini AI 與正則表達式 Sensor，自動識別標題、年份、記者姓名（如「記者○○○/彰化報導」），並對照媒體分類進行清理。
     * **一鍵報表**：自動產出包含服務處、主責查詢同工、媒體分類與超連結的標準化 Excel 檔案，提升行政與輿情整理效率。
     * **模組化減速**：批次發送檢索請求，避免觸發 Google 反爬蟲機制（Anti-Scraping）。
-    * **本地備用演算法防爆**：優先使用 Gemini 進行精準解析；若 API 限流則自動啟動「本地防爆演算法」，保障 100% 順利產出。
+    * **本地備用演算法防爆**：優先使用 Gemini 進行精準解析；若 API 限流則自動啟動「本地 Sensor 演算法」，保障 100% 順利產出。
     """
     )
 
@@ -441,8 +511,8 @@ elif sidebar_option == "📌 系統須知":
     st.warning(
         """
     1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用，嚴禁用於商業爬蟲、網路攻擊或任何非法用途。
-    2. **API額度雙保險機制**：系統採用 Gemini 1.5 Flash 模型，若仍遇到 429 配額額滿，會自動無縫轉入「本地純文字演算法」，確保資料不遺漏！
-    3. **資料準確性**：AI自動解析結果僅供參考，匯出報表後建議人工進行二次核對，尤其檢核奧丁丁新聞、PChome新聞、蕃新聞、奇摩新聞等4家媒體，確認有無遺漏。
+    2. **API額度雙保險機制**：系統採用 Gemini 1.5 Flash 模型，若仍遇到 429 配額額滿，會自動無縫轉入「本地 Sensor 演算法」，確保記者與資料不遺漏！
+    3. **資料準確性**：AI 與 Sensor 解析結果僅供參考，匯出報表後建議人工進行二次核對，尤其檢核奧丁丁新聞、PChome新聞、蕃新聞、奇摩新聞等4家媒體，確認有無遺漏。
     4. **中心PDF檔留存**：報表生成後，請將每一篇報導儲存成PDF檔，放置於中心查報資料夾備查。
     5. **人工調整格式**：報表生成後，請配合將資料貼入「2026年單位季報_媒體統計格式」之excel檔，並視情況補充記者姓名。
     6. **非網路新聞補充**：本系統僅能抓取網路電子新聞，紙本報紙、電台廣播、電視新聞等露出請務必人工補充，俾使資料趨於完整。
