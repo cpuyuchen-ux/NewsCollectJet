@@ -17,7 +17,9 @@ import streamlit as st
 try:
     from bs4 import BeautifulSoup
 except ImportError:
-    st.error("❌ 系統缺少 'bs4' 套件！請在終端機執行：pip install beautifulsoup4")
+    st.error(
+        "❌ 系統缺少 'bs4' 套件！請在終端機執行：pip install beautifulsoup4"
+    )
     st.stop()
 
 try:
@@ -107,7 +109,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="sub-header">支援全網頁小報（警政時報、台中時報等）無 API 本地深度檢索與記者自動辨識</div>',
+    '<div class="sub-header">支援全網頁小報無 API 本地深度檢索、雙重關聯過濾與記者精準辨識</div>',
     unsafe_allow_html=True,
 )
 
@@ -115,7 +117,7 @@ st.markdown(
     """
 <div class="warning-bar">
     <p class="warning-text">※此系統為個人自主開發，請勿用做非法行為😈</p>
-    <p class="warning-text">※已強化全網小報抓取演算法，打破 Google News 限制，自動搜羅地方媒體🌏</p>
+    <p class="warning-text">※已強化全網小報抓取與記者識別演算法，結合雙重檢核精準過濾無關新聞🌏</p>
     <p class="warning-text">※檢索資料庫為「彰化家扶」常見出報媒體，資料庫將不定期更新👀</p>
     <p class="warning-text">※此系統供同工免費使用，惟開發者仍保有此系統所有權，敬請尊重著作權🔧</p>
 </div>
@@ -164,46 +166,56 @@ if os.path.exists(db_file_path):
         st.sidebar.error(f"❌ 讀取 database.csv 失敗: {e}")
 
 # ---------------------------------------------------------------------------
-# 4. 關鍵演算法：Google RSS 穩定檢索 + 連結有效性驗證 + 記者 Sensor
+# 4. 關鍵演算法：HTTP Fetch + 雙重過濾 + 強化記者 Sensor
 # ---------------------------------------------------------------------------
-def is_url_valid(url, timeout=5):
-    """
-    【任務 2 實作】連結有效性檢測：
-    嘗試對 URL 發送 HTTP 請求，確認頁面是否正常回應 (HTTP 200/301/302)。
-    若發生 404 或連線失敗則回傳 False。
-    """
+
+def fetch_article_text(url):
+    """嘗試取得新聞網頁的前段內文，用於精準抓取記者姓名與過濾雜訊"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
     try:
-        req = urllib.request.Request(url, headers=headers, method="HEAD")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status < 400
+        req = urllib.request.Request(url, headers=headers)
+        # 設定短 timeout (3秒)，避免爬蟲卡死
+        with urllib.request.urlopen(req, timeout=3) as response:
+            html = response.read().decode("utf-8", errors="ignore")
+            soup = BeautifulSoup(html, "html.parser")
+            
+            # 移除腳本與樣式標籤
+            for script in soup(["script", "style"]):
+                script.extract()
+                
+            text = soup.get_text(separator=" ")
+            # 清理空白字元並截取前 1000 字（記者名字通常在開頭）
+            clean_text = re.sub(r"\s+", " ", text).strip()
+            return clean_text[:1000]
     except Exception:
-        # 若 HEAD 請求受阻，退回嘗試 GET 請求確認
-        try:
-            req = urllib.request.Request(url, headers=headers, method="GET")
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.status < 400
-        except Exception:
-            return False
+        return ""
 
 
 def extract_reporter_sensor(text):
-    """記者姓名辨識 Sensor：以 Regex 抓取『記者○○○報導』或『○○○/地區報導』"""
+    """高精度記者姓名辨識 Sensor：支援更多常見媒體記者格式"""
     if not text:
         return "編輯部"
 
     patterns = [
-        r"記者\s*([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*[\u4e00-\u9fa5]+報導",
+        # 專利格式：〔記者張小明／彰化報導〕, 記者張小明／彰化報導
+        r"〔?記者\s*([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*[\u4e00-\u9fa5]+報導〕?",
+        # 格式：記者張小明報導
         r"記者\s*([\u4e00-\u9fa5]{2,4})\s*報導",
-        r"([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*[\u4e00-\u9fa5]+報導",
+        # 格式：文／張小明、圖／張小明
+        r"(?:文|圖|攝影)\s*[\/／]\s*([\u4e00-\u9fa5]{2,4})",
+        # 格式：張小明／彰化報導
+        r"([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*(?:彰化|地方|即時|綜合|專題)+報導",
+        # 格式：(記者張小明)
+        r"[\(（]記者\s*([\u4e00-\u9fa5]{2,4})[\)）]",
+        # 通用兜底
         r"(?<!新聞)(?<!家扶)(?<!媒體)(?<!即時)(?<!中心)\b([\u4e00-\u9fa5]{2,4})\s*報導",
     ]
 
     exclude_words = [
-        "新聞", "家扶", "中心", "本報", "綜合", "特別",
-        "即時", "彰化", "地方", "責任", "編輯", "專題", "社會"
+        "新聞", "家扶", "中心", "本報", "綜合", "特別", "即時", 
+        "彰化", "地方", "責任", "編輯", "專題", "社會", "生活", "焦點"
     ]
 
     for pattern in patterns:
@@ -264,9 +276,10 @@ def parse_media_from_url_or_title(title, url, source_elem_text=None):
 def fetch_google_news_rss(org, keyword):
     """
     ⚡ 高穩定 Google News RSS 檢索引擎：
-    免 API 金鑰、不鎖 IP，能大幅涵蓋全網地方新聞與各大報社。
+    加入嚴格雙引號語意檢索，降低無關新聞占比。
     """
-    search_query = f"{org} {keyword}"
+    # 使用雙引號強烈限制搜尋範疇
+    search_query = f'"{org}" "{keyword}"'
     encoded_query = urllib.parse.quote(search_query)
     rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
 
@@ -322,7 +335,7 @@ def clean_title_local(title):
 
 
 def run_news_pipeline(
-    office, staff_name, org, keyword, year, media_map, GEMINI_API_KEY, column_mapping
+    office, staff_name, org, keyword, year, media_map, GEMINI_API_KEY
 ):
     # 記錄檢索歷史
     st.session_state["search_history"].append(
@@ -337,14 +350,16 @@ def run_news_pipeline(
     )
 
     # 1. 啟動 RSS 穩定爬蟲
-    with st.spinner(f"🕷️ 正在搜羅全網新聞報導（含地方新聞與全網新聞網）『{org} {keyword}』..."):
+    with st.spinner(
+        f"🕷️ 正在搜羅全網新聞報導（含地方新聞與全網新聞網）『{org} {keyword}』..."
+    ):
         raw_results = fetch_google_news_rss(org, keyword)
 
     if not raw_results:
         st.error("❌ 未抓取到相關網頁，請嘗試更換關鍵字。")
-        return [], 0
+        return []
 
-    # 2. 初始化 Gemini Client (若有提供 API Key)
+    # 2. 初始化 Gemini Client
     client = None
     if genai and GEMINI_API_KEY:
         try:
@@ -353,8 +368,7 @@ def run_news_pipeline(
             st.sidebar.warning(f"⚠️ Gemini 初始化失敗：{e}")
 
     results = []
-    invalid_count = 0  # 記錄被過濾掉的無效連結數量
-
+    
     # 建立動態文字與進度條佔位元件
     progress_text_slot = st.empty()
     progress_bar = st.progress(0)
@@ -362,34 +376,42 @@ def run_news_pipeline(
 
     for i, item in enumerate(raw_results):
         percent = int((i + 1) / total_items * 100)
-
-        # 動態更新進度文字與進度條 (格式：✈️ 正在驗證與解析新聞... 65%)
-        progress_text_slot.markdown(f"✈️ **新聞驗證與解析進度：{percent}% ({i+1}/{total_items})**")
+        
+        progress_text_slot.markdown(f"✈️ **新聞深度解析與相關性過濾中：{percent}%**")
         progress_bar.progress(percent)
-
-        url = item["url"]
-
-        # 【任務 2 實作】過濾失效或回應異常的網址
-        if not is_url_valid(url):
-            invalid_count += 1
-            continue
 
         cleaned_title = clean_title_local(item["title"])
         media_name = item["media_name"]
         m_type = lookup_media_type(media_name, media_map)
 
-        # 本地 Sensor 優先抓取記者姓名
-        reporter_name = extract_reporter_sensor(item["title"])
+        # 🚀 關鍵改進：抓取新聞網頁開頭內文，用於雙重判定與記者提取
+        article_snippet = fetch_article_text(item["url"])
+        combined_text = f"標題：{item['title']}\n內文開頭：{article_snippet}"
 
-        # 若 Gemini 可用，進行 AI 語意淨化與深化解析
+        # 1. 本地硬過濾：若標題與內文完全不含關鍵字或機構，判定為無關新聞並跳過
+        if (org not in cleaned_title and org not in article_snippet) and \
+           (keyword not in cleaned_title and keyword not in article_snippet):
+            continue
+
+        # 2. 本地 Sensor 優先從內文+標題抓取記者姓名
+        reporter_name = extract_reporter_sensor(combined_text)
+
+        # 3. 若 Gemini 可用，進行 AI 語意過濾、淨化與記者確認
+        is_relevant = True
         if client:
             try:
                 st.session_state["api_count_today"] += 1
                 prompt = f"""
-                請分析新聞標題：『{item['title']}』
-                1. 請清理標題，移除媒體名稱或頻道後綴。
-                2. 嘗試辨識記者姓名 (若無則填 '{reporter_name}')。
-                傳回 JSON 格式：{{"title": "純標題", "reporter": "記者姓名"}}
+                你是一個新聞輿情分析助手。請分析以下新聞內容：
+                {combined_text}
+
+                請執行以下任務：
+                1. 判斷這篇新聞是否與「{org}」以及「{keyword}」高度相關？ (填寫 true 或 false)
+                2. 清理新聞標題，移除媒體名稱、頻道或來源後綴。
+                3. 辨識記者/撰稿人姓名 (若無則填 '{reporter_name}')。
+
+                傳回 JSON 格式：
+                {{"is_relevant": true, "title": "純標題", "reporter": "記者姓名"}}
                 """
                 response = client.models.generate_content(
                     model="gemini-2.5-flash",
@@ -399,29 +421,33 @@ def run_news_pipeline(
                     ),
                 )
                 parsed = json.loads(response.text)
+                is_relevant = parsed.get("is_relevant", True)
                 cleaned_title = parsed.get("title", cleaned_title)
                 reporter_name = parsed.get("reporter", reporter_name)
             except Exception:
-                # 遇到 API 配額上限或解析錯誤時無縫降級至本地 Sensor 處理
+                # API 異常時降級為本地邏輯，保留項目
                 pass
 
-        # 【任務 1 實作】動態使用自訂欄位名稱建立資料字典
-        data_row = {
-            column_mapping["office"]: office,
-            column_mapping["staff"]: staff_name,
-            column_mapping["media_name"]: media_name,
-            column_mapping["media_type"]: m_type,
-            column_mapping["title"]: cleaned_title,
-            column_mapping["reporter"]: reporter_name,
-            column_mapping["url"]: url,
-        }
+        # 若 AI 認定為無關新聞，則予以剔除
+        if not is_relevant:
+            continue
 
-        results.append(data_row)
+        results.append(
+            {
+                "服務處": office,
+                "查報同工": staff_name,
+                "媒體名稱": media_name,
+                "媒體類別": m_type,
+                "新聞標題": cleaned_title,
+                "記者": reporter_name,
+                "新聞連結": item["url"],
+            }
+        )
 
     # 任務完成後清空進度條區塊
     progress_text_slot.empty()
     progress_bar.empty()
-    return results, invalid_count
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -450,31 +476,6 @@ if sidebar_option == "🔍 檢索系統":
             "🔑 搜尋新聞關鍵字：", value="", placeholder="e.g. 課輔班、相見歡、寒冬送暖"
         )
 
-    # 【任務 1 實作】UI 新增自訂 Excel 欄位名稱控制項 (收納於展延區塊)
-    with st.expander("🛠️ 自訂 Excel 報表欄位名稱 (點擊展開修改)", expanded=False):
-        st.caption("您可以自由設定匯出 Excel 時的各欄位名稱，預設為中心標準欄位：")
-        col_c1, col_c2, col_c3 = st.columns(3)
-        with col_c1:
-            col_office = st.text_input("欄位 1 (服務處)：", value="服務處")
-            col_staff = st.text_input("欄位 2 (查報同工)：", value="查報同工")
-            col_media_name = st.text_input("欄位 3 (媒體名稱)：", value="媒體名稱")
-        with col_c2:
-            col_media_type = st.text_input("欄位 4 (媒體類別)：", value="媒體類別")
-            col_title = st.text_input("欄位 5 (新聞標題)：", value="新聞標題")
-            col_reporter = st.text_input("欄位 6 (記者)：", value="記者")
-        with col_c3:
-            col_url = st.text_input("欄位 7 (新聞連結)：", value="新聞連結")
-
-    column_mapping = {
-        "office": col_office,
-        "staff": col_staff,
-        "media_name": col_media_name,
-        "media_type": col_media_type,
-        "title": col_title,
-        "reporter": col_reporter,
-        "url": col_url,
-    }
-
     search_button = st.button("🚀 開始全網檢索與生成報表", use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -492,31 +493,16 @@ if sidebar_option == "🔍 檢索系統":
         if not keyword.strip() or not staff_name.strip():
             st.warning("⚠️ 請完整填寫「搜尋新聞關鍵字」與「主責同工姓名」！")
         else:
-            final_data, invalid_count = run_news_pipeline(
-                office,
-                staff_name,
-                target_org,
-                keyword,
-                year,
-                media_type_map,
-                api_key,
-                column_mapping,
+            final_data = run_news_pipeline(
+                office, staff_name, target_org, keyword, year, media_type_map, api_key
             )
 
             if final_data:
                 df_result = pd.DataFrame(final_data)
-                # 根據新聞連結進行去重
-                df_result = df_result.drop_duplicates(subset=[column_mapping["url"]])
+                df_result = df_result.drop_duplicates(subset=["新聞連結"])
 
-                # 顯示成功提示與無效連結過濾提示 (任務 2 提醒)
-                st.success(f"🎉 成功捕捉到 {len(df_result)} 筆有效新聞！")
-                if invalid_count > 0:
-                    st.warning(
-                        f"⚠️ 檢索過程中已自動過濾掉 {invalid_count} 筆無法存取或失效 (404/Timeout) 的新聞連結。"
-                    )
-
+                st.success(f"🎉 成功捕捉到 {len(df_result)} 筆高品質新聞！")
                 st.balloons()
-
                 st.dataframe(df_result, use_container_width=True)
 
                 output = io.BytesIO()
@@ -528,15 +514,12 @@ if sidebar_option == "🔍 檢索系統":
                 st.download_button(
                     label="📥 下載輿情統計 Excel 報表",
                     data=output.getvalue(),
-                    file_name=f"{target_org}_{keyword}_全網輿情報表.xlsx",
+                    file_name=f"{target_org}_{keyword}_精準輿情報表.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
             else:
-                if invalid_count > 0:
-                    st.error(
-                        f"❌ 未找到有效報導。抓到的連結皆為無法存取或已下架之新聞 (共過濾 {invalid_count} 筆)。"
-                    )
+                st.info("ℹ️ 未能找到符合條件的新聞，或過濾後無相關結果。建議擴大關鍵字範圍試試！")
 
 elif sidebar_option == "💡 系統簡介":
     st.subheader("💡 全網小報檢索系統特點")
@@ -545,29 +528,22 @@ elif sidebar_option == "💡 系統簡介":
     **彰化家扶中心輿情自動檢索與報表生成系統**旨在幫助同工快速彙整網路媒體報導。
 
     * **即時檢索**：自動爬取 Google 最新相關新聞與網頁報導。
-    * **自動連結驗證**：自動過濾失效、404 下架或無法連線之媒體連結，確保報表品質。
-    * **自訂報表欄位**：可自由調整 Excel 欄位名稱，無縫對接中心季報或各類統計表單。
-    * **AI 結構化整理**：運用 Gemini AI 自動識別新聞標題、發布年份、記者姓名、對照媒體分類（三大報/非三大報等）並進行資料淨化。
-    * **一鍵報表**：自動產出包含服務處、主責查詢同工、媒體分類與超連結的標準化 Excel 檔案，提升行政與輿情整理效率。
-    * **模組化減速**：批次發送檢索要求，避免觸發 Google 反爬蟲機制（Anti-Scraping）。
-    * **本地備用演算法防爆機制**：優先使用 Gemini 進行精準解析；若 API 限流則自動啟動「本地防爆演算法」，保障 100% 順利產出。
-    * **高穩定 RSS 搜尋**：採用 XML 解析 Google RSS 頻道，打破一般爬蟲容易被檔 IP 的限制，自動包含地方新聞網與小報。
-    * **自動域名識別**：自動從網址與標題辨識出小報名稱。
-    * **記者姓名 Sensor 強化**：即使小報格式多變，亦能靠正則表達式提取「記者姓名」。
+    * **雙重過濾**：自動採集網頁內文與標題，透過嚴格比對機制排除同名或無關的新聞雜訊。
+    * **記者深度辨識**：突破標題限制，深入網頁前 1000 字開頭提取專利格式與記者署名。
+    * **AI 結構化整理**：運用 Gemini AI 自動識別新聞標題、發布年份、記者姓名、對照媒體分類並進行資料淨化。
+    * **一鍵報表**：自動產出包含服務處、主責查詢同工、媒體分類與超連結的標準化 Excel 檔案。
     """
     )
 
 elif sidebar_option == "📌 系統須知":
     st.subheader("📌 系統須知與使用規範")
-    st.success("※本版本已全面啟用全網小報搜尋模式與連結防爆驗證，抓取效果顯著提升📈")
+    st.success("※本版本已升級「內文深度探針」與「語意雙重過濾」，大幅減少無關新聞並提高記者命中率📈")
     st.warning(
         """
-    1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用，嚴禁用於商業爬蟲、網路攻擊或任何非法用途！
-    2. **API額度雙保險機制**：系統採用 Gemini 2.5 Flash 模型，若遇到 429 配額額滿，會自動無縫轉入「本地 Sensor演算法」，確保記者與資料不遺漏！
-    3. **資料準確性**：AI 與 Sensor 解析結果僅供參考，匯出報表後建議人工進行二次核對，尤其檢核奧丁丁新聞、PChome新聞、蕃新聞、奇摩新聞等4家媒體，確認有無遺漏。
-    4. **中心 PDF 檔留存**：報表生成後，請將每一篇報導儲存成 PDF 檔，放置於中心查報資料夾備查。
-    5. **人工調整格式**：報表生成後，請配合將資料貼入「2026年單位季報_媒體統計格式」之 excel 檔，並視情況補充記者姓名。
-    6. **非網路新聞補充**：本系統僅能抓取網路電子新聞，紙本報紙、電台廣播、電視新聞等露出請務必人工補充，俾使資料趨於完整。
+    1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用，嚴禁用於商業爬蟲或任何非法用途！
+    2. **雙保險機制**：系統優先採用 Gemini Flash 模型與內文爬取；若網頁被防爬蟲阻擋或 API 額滿，會自動降級至本地 Sensor 演算法！
+    3. **資料準確性**：報表匯出後，請人工進行二次核對，確保無遺漏。
+    4. **非網路新聞補充**：紙本報紙、電視新聞等露出請務必人工補充。
     """
     )
 
