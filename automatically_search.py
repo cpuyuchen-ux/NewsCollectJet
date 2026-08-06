@@ -136,19 +136,257 @@ if os.path.exists(db_file_path):
         st.sidebar.error(f"❌ 讀取 database.csv 失敗: {e}")
 
 # ---------------------------------------------------------------------------
-# 4. 功能模組內容
+# 4. 輔助函式定義
 # ---------------------------------------------------------------------------
-if sidebar_option == "系統簡介":
+def render_airplane_progress(percent, text=""):
+    return f"""
+    <div style="width: 100%; margin-top: 10px; margin-bottom: 20px;">
+        <div style="font-size: 0.9rem; font-weight: 600; color: #374151; margin-bottom: 5px;">{text}</div>
+        <div style="width: 100%; background-color: #E5E7EB; border-radius: 10px; height: 24px; position: relative; overflow: hidden;">
+            <div style="width: {percent}%; background: linear-gradient(90deg, #3B82F6, #1D4ED8); height: 100%; transition: width 0.4s ease; display: flex; align-items: center; justify-content: flex-end; padding-right: 5px;">
+                <span style="font-size: 14px;">🛫</span>
+            </div>
+        </div>
+        <div style="text-align: right; font-size: 0.85rem; font-weight: 700; color: #2563EB; margin-top: 3px;">🛫 {percent}%</div>
+    </div>
+    """
+
+
+def lookup_media_type(media_name, media_map):
+    """本地字典模糊與精準比對媒體類別"""
+    m_name = str(media_name).strip()
+    if m_name in media_map:
+        return media_map[m_name]
+    for k, v in media_map.items():
+        if k in m_name or m_name in k:
+            return v
+    return "非三大報全國性"
+
+
+def clean_title_local(title):
+    """本地純 Python 標題清理演算法"""
+    cleaned = re.sub(r"\s*-\s*.*$", "", title)
+    cleaned = re.sub(r"｜.*$", "", cleaned)
+    cleaned = re.sub(r"\|.*$", "", cleaned)
+    return cleaned.strip()
+
+
+def run_news_pipeline(
+    office, staff_name, org, keyword, year, media_map, GEMINI_API_KEY
+):
+    st.session_state["search_history"].append(
+        {
+            "檢索時間": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "服務處": office,
+            "同工姓名": staff_name,
+            "機構": org,
+            "關鍵字": keyword,
+            "目標年份": year,
+        }
+    )
+
+    search_query = f"{org} {keyword}"
+    encoded_query = urllib.parse.quote(search_query)
+    rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+
+    raw_results = []
+    with st.spinner(f"📡 正在經由 Google News 檢索『{search_query}』新聞報導..."):
+        try:
+            req = urllib.request.Request(
+                rss_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                xml_data = response.read()
+            root = ET.fromstring(xml_data)
+            for item in root.findall(".//item"):
+                title = item.find("title").text if item.find("title") is not None else ""
+                link = item.find("link").text if item.find("link") is not None else ""
+                pub_date = item.find("pubDate").text if item.find("pubDate") is not None else ""
+                source = item.find("source").text if item.find("source") is not None else "新聞媒體"
+
+                raw_results.append(
+                    {
+                        "title": title,
+                        "url": link,
+                        "date": pub_date,
+                        "media_name": source,
+                    }
+                )
+        except Exception as e:
+            st.error(f"❌ Google News 檢索異常：{e}")
+            return []
+
+    if not raw_results:
+        return []
+
+    results = []
+    client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+    batch_size = 5
+    batches = [
+        raw_results[i : i + batch_size]
+        for i in range(0, len(raw_results), batch_size)
+    ]
+
+    progress_placeholder = st.empty()
+    progress_placeholder.markdown(
+        render_airplane_progress(0, f"🤖 開始處理新聞資料 (共 {len(batches)} 批次)..."),
+        unsafe_allow_html=True,
+    )
+
+    for idx, batch in enumerate(batches, start=1):
+        if client:
+            batch_payload = [
+                {
+                    "id": i,
+                    "title": item["title"],
+                    "date": item["date"],
+                    "media_name": item["media_name"],
+                }
+                for i, item in enumerate(batch)
+            ]
+
+            prompt = f"""
+            新聞列表：{json.dumps(batch_payload, ensure_ascii=False)}
+            條件：發布年份須為 {year}，標題或內容需包含 {org} 或 {keyword}。
+            請去除標題末端媒體名稱後綴（如「 - 自由時報」），並提取記者姓名 (若無填 '編輯部')。
+            傳回 JSON 格式：
+            {{"articles": [{{"id": 0, "media_name": "媒體名稱", "title": "純標題", "reporter": "記者姓名"}}]}}
+            """
+
+            try:
+                st.session_state["api_count_today"] += 1
+                response = client.models.generate_content(
+                    model="gemini-1.5-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json"
+                    ),
+                )
+                res_data = json.loads(response.text)
+                for parsed in res_data.get("articles", []):
+                    item_orig = batch[parsed["id"]]
+                    m_type = lookup_media_type(parsed.get("media_name", item_orig["media_name"]), media_map)
+                    results.append(
+                        {
+                            "服務處": office,
+                            "查報同工": staff_name,
+                            "媒體名稱": parsed.get("media_name", item_orig["media_name"]),
+                            "媒體類別": m_type,
+                            "新聞標題": parsed.get("title", clean_title_local(item_orig["title"])),
+                            "記者": parsed.get("reporter", "編輯部"),
+                            "新聞連結": item_orig["url"],
+                        }
+                    )
+            except Exception:
+                # 若 AI 發生異常則切換為本地清理備援
+                for item in batch:
+                    m_type = lookup_media_type(item["media_name"], media_map)
+                    results.append(
+                        {
+                            "服務處": office,
+                            "查報同工": staff_name,
+                            "媒體名稱": item["media_name"],
+                            "媒體類別": m_type,
+                            "新聞標題": clean_title_local(item["title"]),
+                            "記者": "編輯部",
+                            "新聞連結": item["url"],
+                        }
+                    )
+        else:
+            # 無 API Key 時使用純本地清洗
+            for item in batch:
+                m_type = lookup_media_type(item["media_name"], media_map)
+                results.append(
+                    {
+                        "服務處": office,
+                        "查報同工": staff_name,
+                        "媒體名稱": item["media_name"],
+                        "媒體類別": m_type,
+                        "新聞標題": clean_title_local(item["title"]),
+                        "記者": "編輯部",
+                        "新聞連結": item["url"],
+                    }
+                )
+
+        # 進度條更新
+        progress_pct = int((idx / len(batches)) * 100)
+        progress_placeholder.markdown(
+            render_airplane_progress(
+                progress_pct, f"🤖 正在處理第 {idx}/{len(batches)} 批次新聞..."
+            ),
+            unsafe_allow_html=True,
+        )
+
+    progress_placeholder.empty()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 5. 功能模組切換 (包含主控台與搜尋介面)
+# ---------------------------------------------------------------------------
+if sidebar_option == "主控台 / 檢索系統":
+    st.markdown('<div class="search-card">', unsafe_allow_html=True)
+    st.subheader("🔍 新聞輿情搜尋條件")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        office = st.selectbox(
+            "🏢 選擇服務處：",
+            ["和美", "員林", "彰化", "鹿港", "二林", "田中"],
+        )
+        org = st.text_input("🏛️ 搜尋機構名稱：", value="彰化家扶")
+        year = st.number_input(
+            "📅 目標年份：", min_value=2000, max_value=2030, value=datetime.date.today().year
+        )
+
+    with col2:
+        staff_name = st.text_input("👤 主責同工姓名：", value="張同工")
+        keyword = st.text_input("🔑 搜尋新聞關鍵字：", value="園遊會")
+
+    search_button = st.button("🚀 開始檢索與生成報表", use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if search_button:
+        if not keyword.strip():
+            st.warning("⚠️ 請輸入搜尋關鍵字！")
+        else:
+            final_data = run_news_pipeline(
+                office, staff_name, org, keyword, year, media_type_map, api_key
+            )
+
+            if final_data:
+                df_result = pd.DataFrame(final_data)
+                st.success(f"🎉 成功找到 {len(df_result)} 筆符合條件的新聞！")
+                st.dataframe(df_result, use_container_width=True)
+
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                    df_result.to_excel(
+                        writer, index=False, sheet_name="新聞輿情統計"
+                    )
+
+                st.download_button(
+                    label="📥 下載輿情統計 Excel 報表",
+                    data=output.getvalue(),
+                    file_name=f"{org}_{keyword}_{year}_輿情報表.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            else:
+                st.info("ℹ️ 未檢索到相關新聞，請嘗試更換關鍵字或年份。")
+
+elif sidebar_option == "系統簡介":
     st.subheader("💡 系統簡介")
     st.markdown(
         """
     **彰化家扶中心輿情自動檢索與報表生成系統** 旨在幫助同工快速彙整網路媒體報導。
 
     * **即時檢索**：自動爬取 Google News 最新相關新聞。
-    * **AI 結構化整理**：運用 Gemini AI 自動識別新聞標題、發布年份、記者姓名、對照媒體分類（三大報/非三大報等）並進行資料淨化。
-    * **一鍵報表**：自動產出包含服務處、主責查詢同工、媒體分類與超連結的標準化 Excel 檔案，提升行政與輿情整理效率。
-    * **模組化減速**：批次發送檢索請求，避免觸發 Google 反爬蟲機制（Anti-Scraping）。
-    * **本地備用演算法防爆**：優先使用 Gemini 2.5 Flash 進行精準解析；若 API 限流則自動啟動「本地防爆演算法」，保障 100% 順利產出。
+    * **AI 結構化整理**：運用 Gemini AI 自動識別新聞標題、發布年份、記者姓名、對照媒體分類並進行資料淨化。
+    * **一鍵報表**：自動產出包含服務處、主責查詢同工、媒體分類與超連結的標準化 Excel 檔案。
+    * **本地備用演算法**：若未填寫 API Key 或遇到網路請求限制，系統會切換至本地文字清理演算法。
     """
     )
 
@@ -156,12 +394,10 @@ elif sidebar_option == "系統須知":
     st.subheader("📌 系統須知與使用規範")
     st.warning(
         """
-    1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用，嚴禁用於商業爬蟲、網路攻擊或任何非法用途。
-    2. **API額度雙保險機制**：系統採用 Gemini 1.5 Flash 模型，若仍遇到 429 配額額滿，會自動無縫轉入「本地純文字演算法」，確保資料不遺漏！
-    3. **資料準確性**：AI自動解析結果僅供參考，匯出報表後建議人工進行二次核對，尤其檢核奧丁丁新聞、PChome新聞、蕃新聞、奇摩新聞等4家媒體，確認有無遺漏。
-    4. **中心PDF檔留存**：報表生成後，請將每一篇報導儲存成PDF檔，放置於中心查報資料夾備查。
-    5. **人工調整格式**：報表生成後，請配合將資料貼入「2026年單位季報_媒體統計格式」之excel檔，並視情況補充記者姓名。
-    6. **非網路新聞補充**：本系統僅能抓取網路電子新聞，紙本報紙、電台廣播、電視新聞等露出請務必人工補充，俾使資料趨於完整。
+    1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用，嚴禁用於商業爬蟲或非法用途。
+    2. **資料準確性**：AI 自動解析結果僅供參考，匯出報表後建議人工進行二次核對。
+    3. **中心 PDF 檔留存**：報表生成後，請將每一篇報導儲存成 PDF 檔放置於中心查報資料夾備查。
+    4. **非網路新聞補充**：本系統僅能抓取網路電子新聞，紙本報紙、廣播、電視新聞等露出請人工補充。
     """
     )
 
@@ -205,178 +441,3 @@ elif sidebar_option == "系統管理員":
 
     elif admin_key:
         st.error("❌ 金鑰錯誤，無法存取管理員後台！")
-
-
-# ---------------------------------------------------------------------------
-# 5. 核心邏輯：方案一 (Gemini 1.5 Flash) + 方案三 (Python 本地防爆)
-# ---------------------------------------------------------------------------
-def render_airplane_progress(percent, text=""):
-    return f"""
-    <div style="width: 100%; margin-top: 10px; margin-bottom: 20px;">
-        <div style="font-size: 0.9rem; font-weight: 600; color: #374151; margin-bottom: 5px;">{text}</div>
-        <div style="width: 100%; background-color: #E5E7EB; border-radius: 10px; height: 24px; position: relative; overflow: hidden;">
-            <div style="width: {percent}%; background: linear-gradient(90deg, #3B82F6, #1D4ED8); height: 100%; transition: width 0.4s ease; display: flex; align-items: center; justify-content: flex-end; padding-right: 5px;">
-                <span style="font-size: 14px;">🛫</span>
-            </div>
-        </div>
-        <div style="text-align: right; font-size: 0.85rem; font-weight: 700; color: #2563EB; margin-top: 3px;">🛫 {percent}%</div>
-    </div>
-    """
-
-
-def lookup_media_type(media_name, media_map):
-    """本地字典模糊與精準比對媒體類別"""
-    m_name = str(media_name).strip()
-    if m_name in media_map:
-        return media_map[m_name]
-    for k, v in media_map.items():
-        if k in m_name or m_name in k:
-            return v
-    return "非三大報全國性"
-
-
-def clean_title_local(title, media_name):
-    """本地純 Python 標題清理演算法 (不用 AI 也能剔除標題後綴)"""
-    cleaned = re.sub(r"\s*-\s*.*$", "", title)  # 剔除 - 自由時報
-    cleaned = re.sub(r"｜.*$", "", cleaned)  # 剔除 ｜ 聯合新聞網
-    cleaned = re.sub(r"\|.*$", "", cleaned)
-    return cleaned.strip()
-
-
-def run_news_pipeline(
-    office, staff_name, org, keyword, year, media_map, GEMINI_API_KEY
-):
-    st.session_state["search_history"].append(
-        {
-            "檢索時間": datetime.datetime.now().strftime(
-                "%Y-%m-%d %H:%M:%S"
-            ),
-            "服務處": office,
-            "同工姓名": staff_name,
-            "機構": org,
-            "關鍵字": keyword,
-            "目標年份": year,
-        }
-    )
-
-    search_query = f"{org} {keyword}"
-    encoded_query = urllib.parse.quote(search_query)
-    rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
-
-    raw_results = []
-    with st.spinner(
-        f"📡 正在經由 Google News 檢索『{search_query}』新聞報導..."
-    ):
-        try:
-            req = urllib.request.Request(
-                rss_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                },
-            )
-            with urllib.request.urlopen(req, timeout=10) as response:
-                xml_data = response.read()
-            root = ET.fromstring(xml_data)
-            for item in root.findall(".//item"):
-                title = (
-                    item.find("title").text
-                    if item.find("title") is not None
-                    else ""
-                )
-                link = (
-                    item.find("link").text
-                    if item.find("link") is not None
-                    else ""
-                )
-                pub_date = (
-                    item.find("pubDate").text
-                    if item.find("pubDate") is not None
-                    else ""
-                )
-                source = (
-                    item.find("source").text
-                    if item.find("source") is not None
-                    else "新聞媒體"
-                )
-
-                raw_results.append(
-                    {
-                        "title": title,
-                        "url": link,
-                        "date": pub_date,
-                        "media_name": source,
-                    }
-                )
-        except Exception as e:
-            st.error(f"❌ Google News 檢索異常：{e}")
-            return []
-
-    if not raw_results:
-        return []
-
-    results = []
-    client = genai.Client(api_key=GEMINI_API_KEY)
-
-    batch_size = 5
-    batches = [
-        raw_results[i : i + batch_size]
-        for i in range(0, len(raw_results), batch_size)
-    ]
-
-    progress_placeholder = st.empty()
-    progress_placeholder.markdown(
-        render_airplane_progress(
-            0, f"🤖 開始處理新聞資料 (共 {len(batches)} 批次)..."
-        ),
-        unsafe_allow_html=True,
-    )
-
-    for idx, batch in enumerate(batches, start=1):
-        batch_payload = [
-            {
-                "id": i,
-                "title": item["title"],
-                "date": item["date"],
-                "media_name": item["media_name"],
-            }
-            for i, item in enumerate(batch)
-        ]
-
-        prompt = f"""
-        新聞列表：{json.dumps(batch_payload, ensure_ascii=False)}
-        條件：發布年份須為 {year}，標題或內容需包含 {org} 或 {keyword}。
-        請去除標題末端媒體名稱後綴（如「 - 自由時報」），並提取記者姓名 (若無填 '編輯部')。
-        傳回 JSON 格式：
-        {{"articles": [{{"id": 0, "media_name": "媒體名稱", "title": "純標題", "reporter": "記者姓名"}}]}}
-        """
-
-        max_retries = 2
-        success = False
-
-        for attempt in range(1, max_retries + 1):
-            try:
-                st.session_state["api_count_today"] += 1
-
-                response = client.models.generate_content(
-                    model="gemini-1.5-flash",
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json"
-                    ),
-                )
-                success = True
-                break
-            except Exception as e:
-                time.sleep(1)
-
-        # 比例計算與進度條更新
-        progress_pct = int((idx / len(batches)) * 100)
-        progress_placeholder.markdown(
-            render_airplane_progress(
-                progress_pct,
-                f"🤖 正在處理第 {idx}/{len(batches)} 批次新聞...",
-            ),
-            unsafe_allow_html=True,
-        )
-
-    return results
