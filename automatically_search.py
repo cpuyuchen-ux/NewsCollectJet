@@ -68,6 +68,25 @@ st.markdown(
         background: linear-gradient(90deg, #1D4ED8, #1E40AF);
         transform: translateY(-1px);
     }
+
+    /* 隱藏 Radio 圓點並放大字型 */
+    div[data-testid="stRadio"] div[role="radiogroup"] > label > div:first-child {
+        display: none !important;
+    }
+    div[data-testid="stRadio"] div[role="radiogroup"] > label {
+        padding: 6px 10px;
+        border-radius: 8px;
+        transition: background-color 0.2s ease;
+        margin-bottom: 4px;
+        cursor: pointer;
+    }
+    div[data-testid="stRadio"] div[role="radiogroup"] > label p {
+        font-size: 1.2rem !important;
+        font-weight: 600 !important;
+    }
+    div[data-testid="stRadio"] div[role="radiogroup"] > label:hover {
+        background-color: #E2E8F0;
+    }
 </style>
 """,
     unsafe_allow_html=True,
@@ -101,11 +120,12 @@ st.markdown(
 # ---------------------------------------------------------------------------
 st.sidebar.title("⚙️ 系統功能導覽")
 
-# 將 selectbox 改為 radio，使選項直接呈現於側邊欄
+# 將 label_visibility 設為 collapsed 以隱藏「請選擇功能模組：」
 sidebar_option = st.sidebar.radio(
     "請選擇功能模組：",
     ["🔍 檢索系統", "💡 系統簡介", "📌 系統須知", "🔐 系統管理員"],
-    index=0
+    index=0,
+    label_visibility="collapsed"
 )
 
 st.sidebar.markdown("---")
