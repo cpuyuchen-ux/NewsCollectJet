@@ -208,7 +208,7 @@ def parse_media_from_url_or_title(title, url):
         "marketersgo.com": "行銷人",
         "gothe.tw": "走遊",
         "tdn.today": "善思新聞網",
-        "ltvnews.net": "在地人新聞,
+        "ltvnews.net": "在地人新聞",
         "firenews.com.tw": "火報",
         "tc.news": "台中新聞網",
         "tn.news": "台灣新聞網",
