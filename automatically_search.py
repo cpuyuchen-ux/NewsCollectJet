@@ -199,7 +199,6 @@ def extract_reporter_sensor(text):
 def parse_media_from_url_or_title(title, url):
     """本地辨識小報媒體名稱 (當 Google 沒標註媒體時)"""
     domain_map = {
-        "news.owlting.com"："奧丁丁新聞",
         "886.news": "警政時報",
         "taichung.news": "台中時報",
         "nantoutimes.com"："南投時報",
