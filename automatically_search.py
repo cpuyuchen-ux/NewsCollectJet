@@ -103,7 +103,7 @@ st.sidebar.title("⚙️ 系統核心設定")
 
 sidebar_option = st.sidebar.selectbox(
     "請選擇功能模組：",
-    ["主控台 / 檢索系統", "系統簡介", "系統須知", "系統管理員"],
+    ["檢索系統", "系統簡介", "系統須知", "系統管理員"],
 )
 
 api_key = st.secrets.get("GEMINI_API_KEY", "")
@@ -164,9 +164,9 @@ def lookup_media_type(media_name, media_map):
 
 
 def clean_title_local(title, media_name=""):
-    """本地純 Python 標題清理演算法 (不用 AI 也能剔除標題後綴)"""
-    cleaned = re.sub(r"\s*-\s*.*$", "", title)  # 剔除 - 自由時報
-    cleaned = re.sub(r"｜.*$", "", cleaned)  # 剔除 ｜ 聯合新聞網
+    """本地純 Python 標題清理演算法"""
+    cleaned = re.sub(r"\s*-\s*.*$", "", title)
+    cleaned = re.sub(r"｜.*$", "", cleaned)
     cleaned = re.sub(r"\|.*$", "", cleaned)
     return cleaned.strip()
 
@@ -295,7 +295,6 @@ def run_news_pipeline(
                 except Exception:
                     time.sleep(1)
 
-        # 若未成功調用 AI 則使用備援演算法
         if not success:
             for item in batch:
                 m_type = lookup_media_type(item["media_name"], media_map)
@@ -326,7 +325,7 @@ def run_news_pipeline(
 # ---------------------------------------------------------------------------
 # 5. 功能模組控制與頁面渲染
 # ---------------------------------------------------------------------------
-if sidebar_option == "主控台 / 檢索系統":
+if sidebar_option == "檢索系統":
     st.markdown('<div class="search-card">', unsafe_allow_html=True)
     st.subheader("🔍 新聞輿情搜尋條件")
 
@@ -334,24 +333,46 @@ if sidebar_option == "主控台 / 檢索系統":
     with col1:
         office = st.selectbox(
             "🏢 選擇服務處：",
-            ["和美", "員林", "彰化", "鹿港", "二林", "田中"],
+            ["全部", "和美兒童館", "員林服務處", "彰化服務處", "二林服務處", "田中服務處"],
         )
-        org = st.text_input("🏛️ 搜尋機構名稱：", value="彰化家扶")
-        year = st.number_input(
-            "📅 目標年份：", min_value=2000, max_value=2030, value=datetime.date.today().year
+        org = st.text_input(
+            "🏛️ 搜尋機構名稱：",
+            placeholder="e.g. 彰化家扶",
+        )
+        year_input = st.text_input(
+            "📅 目標年份：",
+            placeholder="e.g. 2026",
         )
 
     with col2:
-        staff_name = st.text_input("👤 主責同工姓名：", value="張同工")
-        keyword = st.text_input("🔑 搜尋新聞關鍵字：", value="園遊會")
+        staff_name = st.text_input(
+            "👤 主責同工姓名：",
+            placeholder="e.g. 彰化家扶小編",
+        )
+        keyword = st.text_input(
+            "🔑 搜尋新聞關鍵字：",
+            placeholder="e.g. 課輔班、相見歡",
+        )
 
     search_button = st.button("🚀 開始檢索與生成報表", use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     if search_button:
-        if not keyword.strip():
-            st.warning("⚠️ 請輸入搜尋關鍵字！")
+        # 輸入格式防呆檢核
+        if not org.strip():
+            st.warning("⚠️ 請輸入搜尋機構名稱！")
+        elif not keyword.strip():
+            st.warning("⚠️ 請輸入搜尋新聞關鍵字！")
+        elif not staff_name.strip():
+            st.warning("⚠️ 請輸入主責同工姓名！")
         else:
+            # 驗證年份格式
+            try:
+                year = int(year_input.strip()) if year_input.strip() else datetime.date.today().year
+            except ValueError:
+                st.error("❌ 年份請輸入有效的西元年數字（例如：2026）")
+                st.stop()
+
             final_data = run_news_pipeline(
                 office, staff_name, org, keyword, year, media_type_map, api_key
             )
