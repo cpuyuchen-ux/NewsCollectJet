@@ -193,7 +193,9 @@ def fetch_article_text(url):
     }
     try:
         req = urllib.request.Request(url, headers=headers)
+        # 加入 context=ssl_context 防護憑證問題
         with urllib.request.urlopen(req, timeout=4, context=ssl_context) as response:
+            # 防爆：動態檢查編碼，若無預設為 utf-8
             charset = response.headers.get_param("charset") or "utf-8"
             try:
                 html = response.read().decode(charset, errors="replace")
@@ -202,13 +204,16 @@ def fetch_article_text(url):
 
             soup = BeautifulSoup(html, "html.parser")
 
+            # 移除腳本與樣式標籤
             for script in soup(["script", "style", "noscript", "header", "footer"]):
                 script.extract()
 
             text = soup.get_text(separator=" ")
+            # 清理空白字元並截取前 1000 字（記者名字通常在開頭）
             clean_text = re.sub(r"\s+", " ", text).strip()
             return clean_text[:1000]
     except Exception:
+        # 防爆：避免連線逾時、404、403、SSL錯誤中斷整個流程
         return ""
 
 
@@ -218,11 +223,17 @@ def extract_reporter_sensor(text):
         return "編輯部"
 
     patterns = [
+        # 專利格式：〔記者張小明／彰化報導〕, 記者張小明／彰化報導
         r"〔?記者\s*([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*[\u4e00-\u9fa5]+報導〕?",
+        # 格式：記者張小明報導
         r"記者\s*([\u4e00-\u9fa5]{2,4})\s*報導",
+        # 格式：文／張小明、圖／張小明
         r"(?:文|圖|攝影)\s*[\/／]\s*([\u4e00-\u9fa5]{2,4})",
+        # 格式：張小明／彰化報導
         r"([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*(?:彰化|地方|即時|綜合|專題)+報導",
+        # 格式：(記者張小明)
         r"[\(（]記者\s*([\u4e00-\u9fa5]{2,4})[\)）]",
+        # 通用兜底
         r"(?<!新聞)(?<!家扶)(?<!媒體)(?<!即時)(?<!中心)\b([\u4e00-\u9fa5]{2,4})\s*報導",
     ]
 
@@ -295,18 +306,11 @@ def parse_media_from_url_or_title(title, url, source_elem_text=None):
     return "地方網路新聞"
 
 
-def fetch_google_news_rss(org, keyword, site_domains=None):
+def fetch_google_news_rss(org, keyword):
     """
-    ⚡ 高穩定 Google News RSS 檢索引擎 
-    新增 site_domains 參數：支援強化的指定媒體站內搜羅語法 (Site Search)
+    ⚡ 高穩定 Google News RSS 檢索引擎 (含完整 SSL 與 XML 解析防爆)
     """
-    if site_domains:
-        # 組成指定媒體站內搜尋條件： (site:ltn.com.tw OR site:udn.com ...)
-        sites_query = " OR ".join([f"site:{d}" for d in site_domains])
-        search_query = f'"{org}" "{keyword}" ({sites_query})'
-    else:
-        search_query = f'"{org}" "{keyword}"'
-
+    search_query = f'"{org}" "{keyword}"'
     encoded_query = urllib.parse.quote(search_query)
     rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
 
@@ -340,7 +344,7 @@ def fetch_google_news_rss(org, keyword, site_domains=None):
                         }
                     )
             except Exception:
-                continue
+                continue # 單一項目解析失敗自動跳過
     except Exception as e:
         st.error(f"⚠️ RSS 檢索出現異常：{e}")
 
@@ -387,30 +391,17 @@ def run_news_pipeline(
         }
     )
 
-    # 1. 啟動第一階段：全網 RSS 爬蟲
+    # 1. 啟動 RSS 穩定爬蟲
     with st.spinner(
-        f"🕷️ [第一階段] 正在搜羅全網新聞報導『{org} {keyword}』..."
+        f"🕷️ 正在搜羅全網新聞報導（含地方新聞與全網新聞網）『{org} {keyword}』..."
     ):
         raw_results = fetch_google_news_rss(org, keyword)
 
-    # 2. 🚀 新增邏輯：若第一階段查無結果，自動啟動「指定媒體站內深層檢索」機制
     if not raw_results:
-        st.info("ℹ️ 全網一般搜尋未命中，自動啟動「各大媒體站內深層檢索 (Site-Search)」二次探針...")
-        
-        # 預設重點關注媒體網域 (亦可改為從 database.csv 中動態讀取)
-        target_domains = [
-            "ltn.com.tw", "udn.com", "chinatimes.com", "ettoday.net",
-            "cna.com.tw", "cdns.com.tw", "taiwanhot.net", "ksnews.com.tw"
-        ]
-        
-        with st.spinner(f"🔎 [第二階段] 正在針對各大重點媒體進行站內精準檢索..."):
-            raw_results = fetch_google_news_rss(org, keyword, site_domains=target_domains)
-
-    if not raw_results:
-        st.error("❌ 經全網與媒體站內二次檢索後，仍未抓取到相關報導，請更換關鍵字。")
+        st.error("❌ 未抓取到相關網頁，請嘗試更換關鍵字。")
         return []
 
-    # 3. 初始化 Gemini Client
+    # 2. 初始化 Gemini Client
     client = None
     if genai and GEMINI_API_KEY:
         try:
@@ -420,6 +411,7 @@ def run_news_pipeline(
 
     results = []
     
+    # 建立動態文字與進度條佔位元件
     progress_text_slot = st.empty()
     progress_bar = st.progress(0)
     total_items = len(raw_results)
@@ -434,17 +426,19 @@ def run_news_pipeline(
         media_name = item["media_name"]
         m_type = lookup_media_type(media_name, media_map)
 
+        # 🚀 關鍵改進：抓取新聞網頁開頭內文，用於雙重判定與記者提取
         article_snippet = fetch_article_text(item["url"])
         combined_text = f"標題：{item['title']}\n內文開頭：{article_snippet}"
 
-        # 本地硬過濾
+        # 1. 本地硬過濾：若標題與內文完全不含關鍵字或機構，判定為無關新聞並跳過
         if (org not in cleaned_title and org not in article_snippet) and \
            (keyword not in cleaned_title and keyword not in article_snippet):
             continue
 
+        # 2. 本地 Sensor 優先從內文+標題抓取記者姓名
         reporter_name = extract_reporter_sensor(combined_text)
 
-        # Gemini AI 處理
+        # 3. 若 Gemini 可用，進行 AI 語意過濾、淨化與記者確認
         is_relevant = True
         if client:
             try:
@@ -469,6 +463,7 @@ def run_news_pipeline(
                     ),
                 )
                 
+                # 防爆：清理可能包含 Markdown 標記的字串
                 raw_json = response.text.strip()
                 if raw_json.startswith("```json"):
                     raw_json = raw_json.split("```json")[1].split("```")[0].strip()
@@ -480,8 +475,10 @@ def run_news_pipeline(
                 cleaned_title = parsed.get("title", cleaned_title)
                 reporter_name = parsed.get("reporter", reporter_name)
             except Exception:
+                # 防爆：API 異常、解析失敗時自動降級為本地邏輯，保留項目
                 pass
 
+        # 若 AI 認定為無關新聞，則予以剔除
         if not is_relevant:
             continue
 
@@ -497,6 +494,7 @@ def run_news_pipeline(
             }
         )
 
+    # 任務完成後清空進度條區塊
     progress_text_slot.empty()
     progress_bar.empty()
     return results
@@ -534,6 +532,7 @@ if sidebar_option == "🔍 檢索系統":
     if search_button:
         target_org = org.strip() if org.strip() else "彰化家扶"
         
+        # 年份防爆轉型
         try:
             clean_year_str = re.sub(r"\D", "", year_input.strip())
             year = int(clean_year_str) if clean_year_str else datetime.date.today().year
@@ -555,6 +554,7 @@ if sidebar_option == "🔍 檢索系統":
                 st.balloons()
                 st.dataframe(df_result, use_container_width=True)
 
+                # Excel 生成防爆
                 try:
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine="openpyxl") as writer:
