@@ -4,7 +4,6 @@ import json
 import os
 import re
 import ssl
-import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -18,17 +17,13 @@ import streamlit as st
 try:
     from bs4 import BeautifulSoup
 except ImportError:
-    st.error(
-        "❌ 系統缺少 'bs4' 套件！請在終端機執行：pip install beautifulsoup4"
-    )
+    st.error("❌ 系統缺少 'bs4' 套件！請在終端機執行：pip install beautifulsoup4")
     st.stop()
 
 try:
     import openpyxl
 except ImportError:
-    st.error(
-        "❌ 系統缺少 'openpyxl' 套件（匯出 Excel 必備）！請在終端機執行：pip install openpyxl"
-    )
+    st.error("❌ 系統缺少 'openpyxl' 套件（匯出 Excel 必備）！請在終端機執行：pip install openpyxl")
     st.stop()
 
 try:
@@ -37,7 +32,7 @@ try:
 except ImportError:
     genai = None
 
-# 全域 SSL context，避免爬取特定網站時因憑證過期/異常而報錯崩潰
+# 全域 SSL context，避免爬取特定網站時因憑證問題報錯崩潰
 ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
@@ -63,7 +58,7 @@ if st.session_state["last_api_date"] != datetime.date.today():
     st.session_state["api_count_today"] = 0
     st.session_state["last_api_date"] = datetime.date.today()
 
-# 注入 CSS 樣式
+# CSS 樣式
 st.markdown(
     """
 <style>
@@ -140,7 +135,24 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
-# 3. 側邊欄與資料庫讀取
+# 3. 核心工具：自動把網址/字串轉成純 Domain
+# ---------------------------------------------------------------------------
+
+def extract_domain(url_or_domain):
+    """將傳入的網址或字串自動清理為純粹的主 Domain (例如：ltn.com.tw, udn.com)"""
+    if not url_or_domain or not isinstance(url_or_domain, str):
+        return ""
+    
+    # 去除首尾空白與 http://, https://
+    domain = re.sub(r"^https?://", "", url_or_domain.strip(), flags=re.IGNORECASE)
+    # 截斷第一個斜線 / 之後的所有路徑與參數
+    domain = domain.split('/')[0].split('?')[0].split('#')[0]
+    # 去除前綴如 www. 或 news.
+    domain = re.sub(r"^(www\.|news\.)", "", domain, flags=re.IGNORECASE)
+    return domain.lower()
+
+# ---------------------------------------------------------------------------
+# 4. 側邊欄與資料庫讀取 (讀取 database.csv 與自動網域萃取)
 # ---------------------------------------------------------------------------
 st.sidebar.title("⚙️ 系統功能導覽")
 sidebar_option = st.sidebar.radio(
@@ -162,6 +174,7 @@ if not api_key:
 st.sidebar.markdown("---")
 db_file_path = "database.csv"
 media_type_map = {}
+db_domains = []
 
 if os.path.exists(db_file_path):
     try:
@@ -170,21 +183,36 @@ if os.path.exists(db_file_path):
         if len(db_df.columns) >= 2:
             media_col = db_df.columns[0]
             type_col = db_df.columns[1]
-            media_type_map = dict(
-                zip(
-                    db_df[media_col].astype(str).str.strip(),
-                    db_df[type_col].astype(str).str.strip(),
-                )
-            )
+            
+            for _, row in db_df.iterrows():
+                m_name = str(row[media_col]).strip()
+                m_type = str(row[type_col]).strip()
+                media_type_map[m_name] = m_type
+                
+                # 如果第三欄有填 Domain 或第一欄本身就是網址，自動轉純 Domain
+                possible_url = ""
+                if len(row) >= 3 and pd.notna(row.iloc[2]):
+                    possible_url = str(row.iloc[2])
+                elif "." in m_name:
+                    possible_url = m_name
+                    
+                clean_dom = extract_domain(possible_url)
+                if clean_dom:
+                    db_domains.append(clean_dom)
+                    media_type_map[clean_dom] = m_type
+
+            db_domains = list(set(db_domains))
+            if db_domains:
+                st.sidebar.info(f"🎯 已鎖定資料庫 {len(db_domains)} 個媒體站內檢索點")
     except Exception as e:
         st.sidebar.error(f"❌ 讀取 database.csv 失敗: {e}")
 
 # ---------------------------------------------------------------------------
-# 4. 關鍵演算法：HTTP Fetch + 雙重過濾 + 強化記者 Sensor + 防爆設計
+# 5. 核心演算法：HTTP Fetch + 雙重過濾 + 精準記者探針
 # ---------------------------------------------------------------------------
 
 def fetch_article_text(url):
-    """嘗試取得新聞網頁的前段內文，用於精準抓取記者姓名與過濾雜訊 (含防爆機制)"""
+    """嘗試取得新聞網頁的前段內文，用於精準抓取記者姓名與過濾雜訊"""
     if not url or not isinstance(url, str) or not url.startswith(("http://", "https://")):
         return ""
 
@@ -193,9 +221,7 @@ def fetch_article_text(url):
     }
     try:
         req = urllib.request.Request(url, headers=headers)
-        # 加入 context=ssl_context 防護憑證問題
         with urllib.request.urlopen(req, timeout=4, context=ssl_context) as response:
-            # 防爆：動態檢查編碼，若無預設為 utf-8
             charset = response.headers.get_param("charset") or "utf-8"
             try:
                 html = response.read().decode(charset, errors="replace")
@@ -204,58 +230,64 @@ def fetch_article_text(url):
 
             soup = BeautifulSoup(html, "html.parser")
 
-            # 移除腳本與樣式標籤
-            for script in soup(["script", "style", "noscript", "header", "footer"]):
+            for script in soup(["script", "style", "noscript", "header", "footer", "nav"]):
                 script.extract()
 
             text = soup.get_text(separator=" ")
-            # 清理空白字元並截取前 1000 字（記者名字通常在開頭）
             clean_text = re.sub(r"\s+", " ", text).strip()
-            return clean_text[:1000]
+            return clean_text[:1200]
     except Exception:
-        # 防爆：避免連線逾時、404、403、SSL錯誤中斷整個流程
         return ""
 
 
-def extract_reporter_sensor(text):
-    """高精度記者姓名辨識 Sensor：支援更多常見媒體記者格式 (含防爆機制)"""
-    if not text or not isinstance(text, str):
+def reporter_detector_sensor(article_text):
+    """
+    高精度新聞記者內文探針
+    支援格式：
+    - 記者陳雅芳/彰化報導、記者 林明佑／台中報導
+    - (記者陳雅芳/彰化報導)、〔記者林明佑/彰化報導〕
+    - 陳雅芳/彰化報導、林明佑／即時報導
+    - 文/陳雅芳、圖／林明佑
+    """
+    if not article_text or not isinstance(article_text, str):
         return "編輯部"
 
+    clean_text = re.sub(r"\s+", " ", article_text).strip()
+
     patterns = [
-        # 專利格式：〔記者張小明／彰化報導〕, 記者張小明／彰化報導
-        r"〔?記者\s*([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*[\u4e00-\u9fa5]+報導〕?",
-        # 格式：記者張小明報導
+        # 1. 包含「記者」+ 姓名 + 斜線 + 地名/類別 + 報導
+        r"記者\s*([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*[\u4e00-\u9fa5]{2,6}\s*報導",
+        
+        # 2. 括號/方括號包覆
+        r"[（\(〔\[]\s*記者\s*([\u4e00-\u9fa5]{2,4})\s*[\/／\s]*[\u4e00-\u9fa5]*\s*報導\s*[）\)〕\]]",
+        
+        # 3. 無「記者」二字直接接地名報導
+        r"(?<!新聞)(?<!中心)(?<!家扶)\b([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*(?:彰化|台中|台北|高雄|地方|即時|綜合|專題)+\s*報導",
+        
+        # 4. 單純「記者 姓名 報導」
         r"記者\s*([\u4e00-\u9fa5]{2,4})\s*報導",
-        # 格式：文／張小明、圖／張小明
-        r"(?:文|圖|攝影)\s*[\/／]\s*([\u4e00-\u9fa5]{2,4})",
-        # 格式：張小明／彰化報導
-        r"([\u4e00-\u9fa5]{2,4})\s*[\/／]\s*(?:彰化|地方|即時|綜合|專題)+報導",
-        # 格式：(記者張小明)
-        r"[\(（]記者\s*([\u4e00-\u9fa5]{2,4})[\)）]",
-        # 通用兜底
-        r"(?<!新聞)(?<!家扶)(?<!媒體)(?<!即時)(?<!中心)\b([\u4e00-\u9fa5]{2,4})\s*報導",
+        
+        # 5. 文/圖/攝影 署名
+        r"(?:文|圖|攝影|責任編輯)\s*[\/／]\s*([\u4e00-\u9fa5]{2,4})"
     ]
 
-    exclude_words = [
-        "新聞", "家扶", "中心", "本報", "綜合", "特別", "即時", 
-        "彰化", "地方", "責任", "編輯", "專題", "社會", "生活", "焦點"
-    ]
+    exclude_words = {
+        "彰化", "台中", "台北", "地方", "即時", "綜合", "專題", "社會", "生活",
+        "新聞", "家扶", "中心", "本報", "特別", "責任", "編輯", "焦點", "總會"
+    }
 
     for pattern in patterns:
-        try:
-            match = re.search(pattern, text)
-            if match:
-                name = match.group(1).strip()
-                if name not in exclude_words:
-                    return name
-        except Exception:
-            continue
+        matches = re.finditer(pattern, clean_text)
+        for match in matches:
+            reporter_name = match.group(1).strip()
+            if 2 <= len(reporter_name) <= 4 and reporter_name not in exclude_words:
+                return reporter_name
+
     return "編輯部"
 
 
 def parse_media_from_url_or_title(title, url, source_elem_text=None):
-    """本地辨識媒體名稱 (含防爆機制)"""
+    """本地辨識媒體名稱 (結合 Domain 判讀)"""
     title = str(title) if title else ""
     url = str(url) if url else ""
 
@@ -263,7 +295,7 @@ def parse_media_from_url_or_title(title, url, source_elem_text=None):
         return str(source_elem_text).strip()
 
     domain_map = {
-        "news.owlting.com": "奧丁丁新聞",
+        "owlting.com": "奧丁丁新聞",
         "886.news": "警政時報",
         "taichung.news": "台中時報",
         "nantoutimes.com": "南投時報",
@@ -290,8 +322,12 @@ def parse_media_from_url_or_title(title, url, source_elem_text=None):
         "yahoo.com": "Yahoo奇摩新聞",
     }
 
-    for domain, name in domain_map.items():
-        if domain in url:
+    clean_dom = extract_domain(url)
+    if clean_dom in domain_map:
+        return domain_map[clean_dom]
+
+    for domain_key, name in domain_map.items():
+        if domain_key in clean_dom:
             return name
 
     try:
@@ -306,11 +342,22 @@ def parse_media_from_url_or_title(title, url, source_elem_text=None):
     return "地方網路新聞"
 
 
-def fetch_google_news_rss(org, keyword):
+def fetch_google_news_rss(org, keyword, site_domains=None):
     """
-    ⚡ 高穩定 Google News RSS 檢索引擎 (含完整 SSL 與 XML 解析防爆)
+    ⚡ 高穩定 Google News RSS 檢索引擎
+    支援自動帶入精準 site:domain1 OR site:domain2 站內檢索語法
     """
-    search_query = f'"{org}" "{keyword}"'
+    if site_domains and len(site_domains) > 0:
+        # 只取前 15 個網域組合，防止 URL 過長
+        valid_sites = [f"site:{extract_domain(d)}" for d in site_domains if extract_domain(d)][:15]
+        if valid_sites:
+            sites_query = " OR ".join(valid_sites)
+            search_query = f'"{org}" "{keyword}" ({sites_query})'
+        else:
+            search_query = f'"{org}" "{keyword}"'
+    else:
+        search_query = f'"{org}" "{keyword}"'
+
     encoded_query = urllib.parse.quote(search_query)
     rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
 
@@ -344,15 +391,20 @@ def fetch_google_news_rss(org, keyword):
                         }
                     )
             except Exception:
-                continue # 單一項目解析失敗自動跳過
+                continue
     except Exception as e:
         st.error(f"⚠️ RSS 檢索出現異常：{e}")
 
     return results
 
 
-def lookup_media_type(media_name, media_map):
-    """對照媒體類別 (含防爆機制)"""
+def lookup_media_type(media_name, media_map, url=""):
+    """對照媒體類別 (支援名稱與 Domain 對照)"""
+    if url:
+        dom = extract_domain(url)
+        if dom in media_map:
+            return media_map[dom]
+
     if not media_name:
         return "非三大報全國性"
     
@@ -366,7 +418,7 @@ def lookup_media_type(media_name, media_map):
 
 
 def clean_title_local(title):
-    """標題清理 (去除網站後綴，含防爆)"""
+    """標題清理 (去除網站後綴)"""
     if not title:
         return ""
     try:
@@ -377,7 +429,7 @@ def clean_title_local(title):
 
 
 def run_news_pipeline(
-    office, staff_name, org, keyword, year, media_map, GEMINI_API_KEY
+    office, staff_name, org, keyword, year, media_map, db_domains, GEMINI_API_KEY
 ):
     # 記錄檢索歷史
     st.session_state["search_history"].append(
@@ -391,17 +443,21 @@ def run_news_pipeline(
         }
     )
 
-    # 1. 啟動 RSS 穩定爬蟲
-    with st.spinner(
-        f"🕷️ 正在搜羅全網新聞報導（含地方新聞與全網新聞網）『{org} {keyword}』..."
-    ):
+    # 1. 啟動第一階段：全網精準 RSS 檢索
+    with st.spinner(f"🕷️ [第一階段] 正在搜羅全網新聞報導『"{org}" "{keyword}"』..."):
         raw_results = fetch_google_news_rss(org, keyword)
 
+    # 2. 自動二次探針：若全網未抓到結果，但有資料庫 Domain，自動啟動「指定媒體站內深層檢索」
+    if not raw_results and db_domains:
+        st.info("ℹ️ 全網一般搜尋未命中，自動啟動 database.csv 媒體網域站內二次檢索 (Site-Search)...")
+        with st.spinner("🔎 [第二階段] 正在針對指定媒體 Domain 進行站內精準檢索..."):
+            raw_results = fetch_google_news_rss(org, keyword, site_domains=db_domains)
+
     if not raw_results:
-        st.error("❌ 未抓取到相關網頁，請嘗試更換關鍵字。")
+        st.error("❌ 經全網與媒體站內二次檢索後，仍未抓取到相關報導，請更換關鍵字。")
         return []
 
-    # 2. 初始化 Gemini Client
+    # 3. 初始化 Gemini Client
     client = None
     if genai and GEMINI_API_KEY:
         try:
@@ -410,35 +466,32 @@ def run_news_pipeline(
             st.sidebar.warning(f"⚠️ Gemini 初始化失敗：{e}")
 
     results = []
-    
-    # 建立動態文字與進度條佔位元件
     progress_text_slot = st.empty()
     progress_bar = st.progress(0)
     total_items = len(raw_results)
 
     for i, item in enumerate(raw_results):
         percent = int((i + 1) / total_items * 100)
-        
-        progress_text_slot.markdown(f"✈️ **新聞深度解析與相關性過濾中：{percent}%**")
+        progress_text_slot.markdown(f"✈️ **新聞深度解析與精準記者探針辨識中：{percent}%**")
         progress_bar.progress(percent)
 
         cleaned_title = clean_title_local(item["title"])
         media_name = item["media_name"]
-        m_type = lookup_media_type(media_name, media_map)
+        m_type = lookup_media_type(media_name, media_map, item["url"])
 
-        # 🚀 關鍵改進：抓取新聞網頁開頭內文，用於雙重判定與記者提取
+        # 抓取內文前段
         article_snippet = fetch_article_text(item["url"])
         combined_text = f"標題：{item['title']}\n內文開頭：{article_snippet}"
 
-        # 1. 本地硬過濾：若標題與內文完全不含關鍵字或機構，判定為無關新聞並跳過
+        # 本地硬過濾 (嚴格雙重比對)
         if (org not in cleaned_title and org not in article_snippet) and \
            (keyword not in cleaned_title and keyword not in article_snippet):
             continue
 
-        # 2. 本地 Sensor 優先從內文+標題抓取記者姓名
-        reporter_name = extract_reporter_sensor(combined_text)
+        # 執行精準記者探針
+        reporter_name = reporter_detector_sensor(combined_text)
 
-        # 3. 若 Gemini 可用，進行 AI 語意過濾、淨化與記者確認
+        # Gemini AI 語意檢核 (若 API 可用)
         is_relevant = True
         if client:
             try:
@@ -463,7 +516,6 @@ def run_news_pipeline(
                     ),
                 )
                 
-                # 防爆：清理可能包含 Markdown 標記的字串
                 raw_json = response.text.strip()
                 if raw_json.startswith("```json"):
                     raw_json = raw_json.split("```json")[1].split("```")[0].strip()
@@ -475,10 +527,8 @@ def run_news_pipeline(
                 cleaned_title = parsed.get("title", cleaned_title)
                 reporter_name = parsed.get("reporter", reporter_name)
             except Exception:
-                # 防爆：API 異常、解析失敗時自動降級為本地邏輯，保留項目
                 pass
 
-        # 若 AI 認定為無關新聞，則予以剔除
         if not is_relevant:
             continue
 
@@ -494,14 +544,13 @@ def run_news_pipeline(
             }
         )
 
-    # 任務完成後清空進度條區塊
     progress_text_slot.empty()
     progress_bar.empty()
     return results
 
 
 # ---------------------------------------------------------------------------
-# 5. UI 與主流程控制
+# 6. UI 與主流程控制
 # ---------------------------------------------------------------------------
 if sidebar_option == "🔍 檢索系統":
     st.markdown('<div class="search-card">', unsafe_allow_html=True)
@@ -532,7 +581,6 @@ if sidebar_option == "🔍 檢索系統":
     if search_button:
         target_org = org.strip() if org.strip() else "彰化家扶"
         
-        # 年份防爆轉型
         try:
             clean_year_str = re.sub(r"\D", "", year_input.strip())
             year = int(clean_year_str) if clean_year_str else datetime.date.today().year
@@ -543,7 +591,7 @@ if sidebar_option == "🔍 檢索系統":
             st.warning("⚠️ 請完整填寫「搜尋新聞關鍵字」與「主責同工姓名」！")
         else:
             final_data = run_news_pipeline(
-                office, staff_name.strip(), target_org, keyword.strip(), year, media_type_map, api_key
+                office, staff_name.strip(), target_org, keyword.strip(), year, media_type_map, db_domains, api_key
             )
 
             if final_data:
@@ -554,7 +602,6 @@ if sidebar_option == "🔍 檢索系統":
                 st.balloons()
                 st.dataframe(df_result, use_container_width=True)
 
-                # Excel 生成防爆
                 try:
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -581,20 +628,20 @@ elif sidebar_option == "💡 系統簡介":
     **彰化家扶中心輿情自動檢索與報表生成系統**旨在幫助同工快速彙整網路媒體報導。
 
     * **即時檢索**：自動爬取 Google 最新相關新聞與網頁報導。
+    * **網域自動轉換 (Domain Extractor)**：不論資料庫輸入何種格式網址，自動轉為標準主網域執行 `site:` 精準定位。
+    * **精準記者探針 (Reporter Sensor)**：內建高精準度新聞內文正規表示式探針，自動識別專利署名格式（如：`記者陳雅芳/彰化報導`）。
     * **雙重過濾**：自動採集網頁內文與標題，透過嚴格比對機制排除同名或無關的新聞雜訊。
-    * **記者深度辨識**：突破標題限制，深入網頁前 1000 字開頭提取專利格式與記者署名。
-    * **AI 結構化整理**：運用 Gemini AI 自動識別新聞標題、發布年份、記者姓名、對照媒體分類並進行資料淨化。
     * **一鍵報表**：自動產出包含服務處、主責查詢同工、媒體分類與超連結的標準化 Excel 檔案。
     """
     )
 
 elif sidebar_option == "📌 系統須知":
     st.subheader("📌 系統須知與使用規範")
-    st.success("※本版本已升級「內文深度探針」與「語意雙重過濾」，大幅減少無關新聞並提高記者命中率📈")
+    st.success("※本版本已升級「 Domain 自動轉譯」與「精準記者內文探針」，大幅提高記者命中率與檢索品質📈")
     st.warning(
         """
     1. **遵守使用規範**：本系統僅供彰化家扶內部輿情檢索使用，嚴禁用於商業爬蟲或任何非法用途！
-    2. **雙保險機制**：系統優先採用 Gemini Flash 模型與內文爬取；若網頁被防爬蟲阻擋或 API 額滿，會自動降級至本地 Sensor 演算法！
+    2. **雙保險機制**：系統優先採用 Gemini Flash 模型與內文爬取；若網頁被防爬蟲阻擋或 API 額滿，會自動降級至本地精準 Sensor 演算法！
     3. **資料準確性**：報表匯出後，請人工進行二次核對，確保無遺漏。
     4. **非網路新聞補充**：紙本報紙、電視新聞等露出請務必人工補充。
     """
